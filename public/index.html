@@ -3,25 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Web Ray Tracer</title>
+    <title>Web Ray Tracer</title>
     <link rel="stylesheet" href="style.css">
-    <!-- Load JavaScript modules (order matters!) -->
-    <!-- Math utilities first -->
-    <script type="module" src="js/math.js"></script>
-    <!-- Base object and specific shapes -->
-    <script type="module" src="js/object.js"></script>
-    <script type="module" src="js/sphere.js"></script>
-    <script type="module" src="js/plane.js"></script>
-    <!-- Scene components -->
-    <script type="module" src="js/light.js"></script>
-    <script type="module" src="js/camera.js"></script>
-    <script type="module" src="js/scene.js"></script>
-    <!-- Core raytracer logic -->
-    <script type="module" src="js/raytracer.js"></script>
-    <!-- UI handling -->
-    <script type="module" src="js/ui.js"></script>
-    <!-- Main application entry point -->
-    <script type="module" src="js/main.js"></script>
 </head>
 <body>
     <div class="container">
@@ -29,73 +12,86 @@
             <canvas id="raytracerCanvas"></canvas>
         </div>
         <div class="controls-panel">
-            <h2>Ray Tracer Controls</h2>
+            <h1>Ray Tracer Controls</h1>
 
             <div class="control-group">
-                <h3>Camera Properties</h3>
-                <div class="slider-group">
-                    <label for="eyeX">Eye X:</label>
-                    <input type="range" id="eyeX" min="-15" max="15" step="0.1" value="0">
-                    <span id="eyeXValue">0.0</span>
+                <h2>Camera Properties</h2>
+                <div class="control-item">
+                    <label>Eye Position:</label>
+                    <span id="eyeXValue">0.00</span>,
+                    <span id="eyeYValue">0.00</span>,
+                    <span id="eyeZValue">0.00</span>
                 </div>
-                <div class="slider-group">
-                    <label for="eyeY">Eye Y:</label>
-                    <input type="range" id="eyeY" min="-15" max="15" step="0.1" value="0">
-                    <span id="eyeYValue">0.0</span>
-                </div>
-                <div class="slider-group">
-                    <label for="eyeZ">Eye Z:</label>
-                    <input type="range" id="eyeZ" min="-15" max="15" step="0.1" value="0">
-                    <span id="eyeZValue">0.0</span>
-                </div>
-
-                <div class="slider-group">
+                <div class="control-item">
                     <label for="lookAtX">LookAt X:</label>
-                    <input type="range" id="lookAtX" min="-5" max="5" step="0.1" value="0">
-                    <span id="lookAtXValue">0.0</span>
+                    <input type="range" id="lookAtX" min="-5.0" max="5.0" step="0.1" value="0.0">
+                    <span id="lookAtXValue">0.00</span>
                 </div>
-                <div class="slider-group">
+                <div class="control-item">
                     <label for="lookAtY">LookAt Y:</label>
-                    <input type="range" id="lookAtY" min="-5" max="5" step="0.1" value="0">
-                    <span id="lookAtYValue">0.0</span>
+                    <input type="range" id="lookAtY" min="-5.0" max="5.0" step="0.1" value="0.0">
+                    <span id="lookAtYValue">0.00</span>
                 </div>
-                <div class="slider-group">
+                <div class="control-item">
                     <label for="lookAtZ">LookAt Z:</label>
-                    <input type="range" id="lookAtZ" min="-5" max="5" step="0.1" value="0">
-                    <span id="lookAtZValue">0.0</span>
+                    <input type="range" id="lookAtZ" min="-5.0" max="5.0" step="0.1" value="0.0">
+                    <span id="lookAtZValue">0.00</span>
                 </div>
-
-                <div class="slider-group">
+                <div class="control-item">
                     <label for="fov">FOV:</label>
                     <input type="range" id="fov" min="10" max="120" step="1" value="75">
-                    <span id="fovValue">75</span>
+                    <span id="fovValue">75.0</span>
                 </div>
-                <div class="slider-group">
+                <div class="control-item">
                     <label for="orbitRadius">Orbit Radius:</label>
-                    <input type="range" id="orbitRadius" min="1" max="20" step="0.1" value="6">
+                    <input type="range" id="orbitRadius" min="1.0" max="20.0" step="0.1" value="6.0">
                     <span id="orbitRadiusValue">6.0</span>
                 </div>
             </div>
 
-            <div class="control-group">
-                <h3>Selected Object Properties</h3>
-                <p id="selectedObjectInfo">No object selected. Click on a sphere to select it.</p>
-                <div class="color-picker-group" style="display: none;">
-                    <label for="objectColor">Color:</label>
-                    <input type="color" id="objectColor" value="#ff0000">
+            <div class="control-group" id="selectedObjectInfo">
+                <h2>Selected Object Properties</h2>
+                <div class="control-item">
+                    <span id="objectType">Type: None</span>
                 </div>
-                <!-- NEW: Model and Texture Properties for Selected Object -->
-                <div class="model-texture-group" style="display: none;">
-                    <h4>Model:</h4>
-                    <input type="file" id="modelFileInput" accept=".obj">
-                    <p id="modelFileName">No model loaded</p>
+                <div class="control-item color-picker-group">
+                    <label for="objectColor">Diffuse Color:</label>
+                    <input type="color" id="objectColor" value="#808080">
+                </div>
 
-                    <h4>Texture:</h4>
+                <!-- NEW: Specular Properties Group -->
+                <div class="control-item specular-group">
+                    <label for="specularColor">Specular Color:</label>
+                    <input type="color" id="specularColor" value="#000000">
+                </div>
+                <div class="control-item specular-group">
+                    <label for="shininess">Shininess:</label>
+                    <input type="range" id="shininess" min="0" max="200" step="1" value="0">
+                    <span id="shininessValue">0</span>
+                </div>
+                <div class="control-item specular-group">
+                    <label for="reflectivity">Reflectivity:</label>
+                    <input type="range" id="reflectivity" min="0.0" max="1.0" step="0.01" value="0.0">
+                    <span id="reflectivityValue">0.00</span>
+                </div>
+            </div>
+
+            <div class="control-group model-texture-group">
+                <h2>Model & Texture Loading</h2>
+                <div class="control-item">
+                    <label for="modelFileInput">Load OBJ Model:</label>
+                    <input type="file" id="modelFileInput" accept=".obj">
+                    <span id="modelFileName">No model loaded</span>
+                </div>
+                <div class="control-item">
+                    <label for="textureFileInput">Apply Texture:</label>
                     <input type="file" id="textureFileInput" accept="image/*">
-                    <p id="textureFileName">No texture applied</p>
+                    <span id="textureFileName">No texture applied</span>
                 </div>
             </div>
         </div>
     </div>
+
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>

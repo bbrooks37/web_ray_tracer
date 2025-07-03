@@ -7,11 +7,14 @@ import { Camera } from './camera.js';
 import { Scene } from './scene.js';
 import { Sphere } from './sphere.js';
 import { Plane } from './plane.js';
-import { Ray } from './ray.js'; // NEW: Added import for Ray
-import { Object } from './object.js'; // NEW: Added import for Object
-import { Light } from './light.js'; // NEW: Added import for Light
+import { Ray } from './ray.js';
+import { Object } from './object.js';
+import { Light } from './light.js';
 import { Raytracer } from './raytracer.js';
 import { UIManager } from './ui.js';
+import { OBJLoader } from './objLoader.js';
+import { Mesh } from './mesh.js';
+import { TextureManager } from './textureManager.js'; // NEW: Import TextureManager
 
 // --- Global Variables ---
 const CANVAS_WIDTH = 640;
@@ -21,6 +24,7 @@ let raytracer;
 let camera;
 let scene;
 let uiManager;
+let textureManager; // NEW: TextureManager instance
 let selectedObject = null; // Stores the currently selected object
 let selectedObjectIndex = -1; // Stores the index of the selected object in the scene's objects array
 
@@ -30,10 +34,10 @@ let lastMouseY = CANVAS_HEIGHT / 2;
 let firstMouse = true;
 let isRotating = false; // True when right mouse button is held down for rotation
 
-let cameraYaw = -90.0;  // Initial yaw angle (looking along -Z axis)
-let cameraPitch = 0.0;  // Initial pitch angle
-let cameraRadius = 6.0; // Distance from lookAt point (orbital radius)
-const CAMERA_SENSITIVITY = 0.1; // How fast the camera rotates with mouse movement
+let cameraYaw = -90.0;
+let cameraPitch = 0.0;
+let cameraRadius = 6.0;
+const CAMERA_SENSITIVITY = 0.1;
 
 // --- Initialization Function ---
 function init() {
@@ -52,137 +56,233 @@ function init() {
     }
 
     // Initialize Camera
-    // Initial camera setup for orbit. The actual eyePosition will be calculated
-    // based on cameraYaw, cameraPitch, and cameraRadius.
-    // The initial lookAt point is (0,0,0), and upVector is (0,1,0).
     camera = new Camera(
-        new Vec3(0, 0, 0), // Placeholder eyePosition, will be updated by orbit logic
-        new Vec3(0, 0, 0), // lookAt
-        new Vec3(0, 1, 0), // upVector
-        75.0,              // fov (wider view)
+        new Vec3(0, 0, 0),
+        new Vec3(0, 0, 0),
+        new Vec3(0, 1, 0),
+        75.0,
         CANVAS_WIDTH, CANVAS_HEIGHT
     );
 
-    // Initialize camera's actual eye position based on initial yaw, pitch, radius
     updateCameraPositionFromOrbit();
-    camera.updateBasis(); // Ensure basis is updated after initial position
+    camera.updateBasis();
 
     // Initialize Scene
-    scene = new Scene(new Vec3(0.1, 0.1, 0.2)); // Slightly bluish background
+    scene = new Scene(new Vec3(0.1, 0.1, 0.2));
+
+    // NEW: Initialize TextureManager
+    textureManager = new TextureManager();
 
     // Add objects to the scene
-    scene.addObject(new Sphere(new Vec3(0.0, 0.5, 0.0), 1.0, new Vec3(1.0, 0.0, 0.0))); // Red sphere
-    scene.addObject(new Sphere(new Vec3(1.8, 0.0, -1.5), 0.6, new Vec3(0.0, 1.0, 0.0))); // Green sphere
-    scene.addObject(new Sphere(new Vec3(-1.5, 1.0, 0.8), 0.7, new Vec3(0.0, 0.0, 1.0))); // Blue sphere
-    const groundPlane = new Plane(new Vec3(0.0, -1.0, 0.0), new Vec3(0.0, 1.0, 0.0), new Vec3(0.8, 0.8, 0.8)); // Ground Plane
-    scene.addObject(groundPlane); // Add ground plane
+    // Example: Add a textured plane (ensure 'checkerboard.png' exists in public/assets/textures for testing)
+    // For initial testing, you might need to manually upload a checkerboard.png or similar.
+    const groundPlane = new Plane(
+        new Vec3(0.0, -1.0, 0.0),
+        new Vec3(0.0, 1.0, 0.0),
+        new Vec3(0.8, 0.8, 0.8),
+        'checkerboard.png', // NEW: Texture ID for the ground plane
+        0.5 // NEW: UV scale for tiling
+    );
+    scene.addObject(groundPlane);
+
+    // Add a shiny red sphere and a less shiny blue sphere for testing specular
+    scene.addObject(new Sphere(new Vec3(0.0, 0.5, 0.0), 1.0,
+        new Vec3(1.0, 0.0, 0.0), // Diffuse Red
+        null, // No texture
+        new Vec3(1.0, 1.0, 1.0), // Specular White
+        50 // Shininess
+    ));
+    scene.addObject(new Sphere(new Vec3(1.8, 0.0, -1.5), 0.6,
+        new Vec3(0.0, 0.5, 0.0), // Diffuse Green
+        null, // No texture
+        new Vec3(0.5, 0.5, 0.5), // Specular Grey
+        10 // Shininess
+    ));
+    scene.addObject(new Sphere(new Vec3(-1.5, 1.0, 0.8), 0.7,
+        new Vec3(0.0, 0.0, 1.0), // Diffuse Blue
+        null, // No texture
+        new Vec3(0.0, 0.0, 0.0), // No Specular
+        0 // Shininess
+    ));
     scene.addObject(new Sphere(new Vec3(-2.0, 0.0, -0.5), 0.4, new Vec3(1.0, 1.0, 0.0))); // Yellow sphere
 
     // Add light sources to the scene
-    scene.addLight(new Light(new Vec3(6.0, 6.0, 6.0), new Vec3(1.0, 1.0, 1.0))); // NEW: Use 'new Light'
-    scene.addLight(new Light(new Vec3(-6.0, 4.0, 3.0), new Vec3(0.5, 0.8, 1.0))); // NEW: Use 'new Light'
+    scene.addLight(new Light(new Vec3(6.0, 6.0, 6.0), new Vec3(1.0, 1.0, 1.0)));
+    scene.addLight(new Light(new Vec3(-6.0, 4.0, 3.0), new Vec3(0.5, 0.8, 1.0)));
 
-    // Initialize Raytracer
-    raytracer = new Raytracer(canvas, ctx, camera, scene);
+    // Initialize Raytracer (pass textureManager)
+    raytracer = new Raytracer(canvas, ctx, camera, scene, textureManager); // Modified constructor call
 
-    // --- Get references to new UI elements ---
+    // --- Get references to UI elements ---
     const modelFileInput = document.getElementById('modelFileInput');
     const textureFileInput = document.getElementById('textureFileInput');
     const modelFileNameDisplay = document.getElementById('modelFileName');
     const textureFileNameDisplay = document.getElementById('textureFileName');
     const modelTextureGroup = document.querySelector('.model-texture-group');
 
+    // NEW: Get references for specular controls
+    const specularColorPicker = document.getElementById('specularColor');
+    const shininessSlider = document.getElementById('shininess');
+    const shininessValueDisplay = document.getElementById('shininessValue');
+    const reflectivitySlider = document.getElementById('reflectivity');
+    const reflectivityValueDisplay = document.getElementById('reflectivityValue');
+    const specularGroup = document.querySelector('.specular-group'); // Assuming you add this div in index.html
+
     // Initialize UI Manager
     uiManager = new UIManager(
-        // Camera controls
         {
-            eyeX: document.getElementById('eyeX'),
-            eyeY: document.getElementById('eyeY'),
-            eyeZ: document.getElementById('eyeZ'),
-            lookAtX: document.getElementById('lookAtX'),
-            lookAtY: document.getElementById('lookAtY'),
-            lookAtZ: document.getElementById('lookAtZ'),
-            fov: document.getElementById('fov'),
-            orbitRadius: document.getElementById('orbitRadius')
+            eyeX: document.getElementById('eyeX'), eyeY: document.getElementById('eyeY'), eyeZ: document.getElementById('eyeZ'),
+            lookAtX: document.getElementById('lookAtX'), lookAtY: document.getElementById('lookAtY'), lookAtZ: document.getElementById('lookAtZ'),
+            fov: document.getElementById('fov'), orbitRadius: document.getElementById('orbitRadius')
         },
-        // Camera value displays
         {
-            eyeXValue: document.getElementById('eyeXValue'),
-            eyeYValue: document.getElementById('eyeYValue'),
-            eyeZValue: document.getElementById('eyeZValue'),
-            lookAtXValue: document.getElementById('lookAtXValue'),
-            lookAtYValue: document.getElementById('lookAtYValue'),
-            lookAtZValue: document.getElementById('lookAtZValue'),
-            fovValue: document.getElementById('fovValue'),
-            orbitRadiusValue: document.getElementById('orbitRadiusValue')
+            eyeXValue: document.getElementById('eyeXValue'), eyeYValue: document.getElementById('eyeYValue'), eyeZValue: document.getElementById('eyeZValue'),
+            lookAtXValue: document.getElementById('lookAtXValue'), lookAtYValue: document.getElementById('lookAtYValue'), lookAtZValue: document.getElementById('lookAtZValue'),
+            fovValue: document.getElementById('fovValue'), orbitRadiusValue: document.getElementById('orbitRadiusValue')
         },
-        // Selected object controls
         {
             selectedObjectInfo: document.getElementById('selectedObjectInfo'),
             colorPickerGroup: document.querySelector('.color-picker-group'),
-            objectColor: document.getElementById('objectColor')
+            objectColor: document.getElementById('objectColor'),
+            // NEW: Pass specular controls to UIManager
+            specularColor: specularColorPicker,
+            shininess: shininessSlider,
+            shininessValue: shininessValueDisplay,
+            reflectivity: reflectivitySlider,
+            reflectivityValue: reflectivityValueDisplay,
+            specularGroup: specularGroup
         },
-        // NEW: Model and Texture controls
         {
-            modelFileInput: modelFileInput,
-            textureFileInput: textureFileInput,
-            modelFileName: modelFileNameDisplay,
-            textureFileName: textureFileNameDisplay,
+            modelFileInput: modelFileInput, textureFileInput: textureFileInput,
+            modelFileName: modelFileNameDisplay, textureFileName: textureFileNameDisplay,
             modelTextureGroup: modelTextureGroup
         }
     );
 
     // Set initial UI values based on camera/scene defaults
-    uiManager.updateCameraValues(camera.eyePosition, camera.lookAt, camera.fov, cameraRadius); // Corrected initial call
-    uiManager.updateEyePositionDisplay(camera.eyePosition); // Display initial eye position
+    uiManager.updateCameraValues(camera.eyePosition, camera.lookAt, camera.fov, cameraRadius);
+    uiManager.updateEyePositionDisplay(camera.eyePosition);
 
     // --- Event Listeners ---
-    // Camera control sliders
     uiManager.cameraControls.lookAtX.oninput = updateCameraFromUI;
     uiManager.cameraControls.lookAtY.oninput = updateCameraFromUI;
     uiManager.cameraControls.lookAtZ.oninput = updateCameraFromUI;
     uiManager.cameraControls.fov.oninput = updateCameraFromUI;
     uiManager.cameraControls.orbitRadius.oninput = updateCameraFromUI;
 
-    // Object color picker
+    // Diffuse color picker
     uiManager.selectedObjectControls.objectColor.oninput = (event) => {
         if (selectedObject) {
             selectedObject.color = Vec3.fromHexString(event.target.value);
-            render(); // Re-render scene after color change
+            render();
         }
     };
 
-    // NEW: Placeholder event listeners for model and texture file inputs
+    // NEW: Specular color picker
+    if (uiManager.selectedObjectControls.specularColor) {
+        uiManager.selectedObjectControls.specularColor.oninput = (event) => {
+            if (selectedObject) {
+                selectedObject.specularColor = Vec3.fromHexString(event.target.value);
+                render();
+            }
+        };
+    }
+
+    // NEW: Shininess slider
+    if (uiManager.selectedObjectControls.shininess) {
+        uiManager.selectedObjectControls.shininess.oninput = (event) => {
+            if (selectedObject) {
+                selectedObject.shininess = parseFloat(event.target.value);
+                uiManager.selectedObjectControls.shininessValue.textContent = selectedObject.shininess.toFixed(0);
+                render();
+            }
+        };
+    }
+
+    // NEW: Reflectivity slider
+    if (uiManager.selectedObjectControls.reflectivity) {
+        uiManager.selectedObjectControls.reflectivity.oninput = (event) => {
+            if (selectedObject) {
+                selectedObject.reflectivity = parseFloat(event.target.value);
+                uiManager.selectedObjectControls.reflectivityValue.textContent = selectedObject.reflectivity.toFixed(2);
+                render();
+            }
+        };
+    }
+
     modelFileInput.onchange = (event) => {
         if (event.target.files.length > 0) {
             const file = event.target.files[0];
-            uiManager.updateModelFileName(file.name);
-            console.log(`Model file selected: ${file.name}. (Parsing logic to be implemented)`);
-            // TODO: Implement actual model loading and parsing here
-            // e.g., loadOBJ(file, selectedObject);
-            render(); // Re-render if model changes
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const objContent = e.target.result;
+                    const loadedMesh = OBJLoader.parse(
+                        objContent,
+                        new Vec3(0.5, 0.7, 1.0), // Default diffuse color for loaded mesh
+                        file.name,
+                        selectedObject ? selectedObject.textureId : null, // Pass current texture if any
+                        selectedObject ? selectedObject.specularColor : new Vec3(0.0, 0.0, 0.0), // Pass current specular color
+                        selectedObject ? selectedObject.shininess : 0, // Pass current shininess
+                        selectedObject ? selectedObject.reflectivity : 0.0 // Pass current reflectivity
+                    );
+                    if (loadedMesh) {
+                        scene.objects = scene.objects.filter(obj => obj instanceof Plane || obj instanceof Sphere);
+                        scene.addObject(loadedMesh);
+                        uiManager.updateModelFileName(file.name);
+                        selectedObject = loadedMesh;
+                        uiManager.displaySelectedObject(selectedObject);
+                        console.log(`Successfully loaded and added mesh: ${file.name}`);
+                    } else {
+                        console.error(`Failed to parse OBJ file: ${file.name}`);
+                        uiManager.updateModelFileName('Failed to load');
+                    }
+                } catch (error) {
+                    console.error(`Error loading OBJ file ${file.name}:`, error);
+                    uiManager.updateModelFileName('Error loading');
+                }
+                render();
+            };
+
+            reader.onerror = (e) => {
+                console.error(`FileReader error for ${file.name}:`, e);
+                uiManager.updateModelFileName('Read error');
+            };
+
+            reader.readAsText(file);
         }
     };
 
-    textureFileInput.onchange = (event) => {
-        if (event.target.files.length > 0) {
+    textureFileInput.onchange = async (event) => {
+        if (event.target.files.length > 0 && selectedObject) {
             const file = event.target.files[0];
-            uiManager.updateTextureFileName(file.name);
-            console.log(`Texture file selected: ${file.name}. (Loading logic to be implemented)`);
-            // TODO: Implement actual texture loading and application here
-            // e.g., loadTexture(file, selectedObject);
-            render(); // Re-render if texture changes
+            uiManager.updateTextureFileName('Loading...');
+            try {
+                const textureId = await textureManager.loadImage(file);
+                selectedObject.textureId = textureId;
+                selectedObject.textureName = file.name;
+                uiManager.updateTextureFileName(file.name);
+                console.log(`Texture '${file.name}' applied to selected object.`);
+            } catch (error) {
+                console.error(`Error loading or applying texture ${file.name}:`, error);
+                uiManager.updateTextureFileName('Error loading');
+                selectedObject.textureId = null;
+            }
+            render();
+        } else if (!selectedObject) {
+            console.warn("No object selected to apply texture to.");
+            uiManager.updateTextureFileName('No object selected');
+        } else {
+            uiManager.updateTextureFileName('No file chosen');
         }
     };
 
 
-    // Mouse events for picking and camera orbit
     canvas.addEventListener('mousedown', onMouseDown);
     canvas.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('wheel', onMouseWheel);
-
-    // Prevent context menu on right-click to allow orbit
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     // Initial render
@@ -191,19 +291,17 @@ function init() {
 
 // --- Camera Update Functions ---
 function updateCameraFromUI() {
-    // Update camera properties from UI sliders
     camera.lookAt.x = parseFloat(uiManager.cameraControls.lookAtX.value);
     camera.lookAt.y = parseFloat(uiManager.cameraControls.lookAtY.value);
     camera.lookAt.z = parseFloat(uiManager.cameraControls.lookAtZ.value);
     camera.fov = parseFloat(uiManager.cameraControls.fov.value);
     cameraRadius = parseFloat(uiManager.cameraControls.orbitRadius.value);
 
-    // Recalculate camera position based on orbit parameters
     updateCameraPositionFromOrbit();
-    camera.updateBasis(); // Update camera basis vectors
-    uiManager.updateEyePositionDisplay(camera.eyePosition); // Update display
-    uiManager.updateCameraValues(camera.eyePosition, camera.lookAt, camera.fov, cameraRadius); // Update UI sliders
-    render(); // Re-render scene
+    camera.updateBasis();
+    uiManager.updateEyePositionDisplay(camera.eyePosition);
+    uiManager.updateCameraValues(camera.eyePosition, camera.lookAt, camera.fov, cameraRadius);
+    render();
 }
 
 function updateCameraPositionFromOrbit() {
@@ -214,37 +312,28 @@ function updateCameraPositionFromOrbit() {
     camera.eyePosition.y = cameraRadius * Math.sin(pitchRad);
     camera.eyePosition.z = cameraRadius * Math.sin(yawRad) * Math.cos(pitchRad);
 
-    // Adjust for lookAt point if it's not at the origin
     camera.eyePosition = camera.eyePosition.add(camera.lookAt);
 }
 
 // --- Mouse Event Handlers ---
 function onMouseDown(event) {
-    // Right mouse button for orbit
-    if (event.button === 2) { // 0: left, 1: middle, 2: right
+    if (event.button === 2) {
         isRotating = true;
-        firstMouse = true; // Reset firstMouse flag when rotation starts
-        // Request pointer lock for continuous mouse movement tracking without cursor leaving window
+        firstMouse = true;
         raytracer.canvas.requestPointerLock();
-    }
-    // Left mouse button for picking
-    else if (event.button === 0) {
+    } else if (event.button === 0) {
         const rect = raytracer.canvas.getBoundingClientRect();
         const x = event.clientX - rect.left;
         const y = event.clientY - rect.top;
 
-        // Convert canvas coordinates to pixel coordinates
         const pixelX = Math.floor(x * (CANVAS_WIDTH / rect.width));
         const pixelY = Math.floor(y * (CANVAS_HEIGHT / rect.height));
 
-        // Perform picking
         const hitResult = raytracer.pickObject(pixelX, pixelY);
 
-        // Filter out the ground plane from selection
-        const groundPlane = scene.objects.find(obj => obj instanceof Plane); // Assuming you have a Plane class
+        const groundPlane = scene.objects.find(obj => obj instanceof Plane);
         if (hitResult.object && hitResult.object !== groundPlane) {
             selectedObject = hitResult.object;
-            // Find the index of the selected object in the scene's objects array
             selectedObjectIndex = scene.objects.indexOf(selectedObject);
             uiManager.displaySelectedObject(selectedObject);
         } else {
@@ -252,30 +341,28 @@ function onMouseDown(event) {
             selectedObjectIndex = -1;
             uiManager.clearSelectedObjectDisplay();
         }
-        render(); // Re-render to reflect selection (e.g., if we added selection highlight)
+        render();
     }
 }
 
 function onMouseUp(event) {
-    if (event.button === 2) { // Right mouse button
+    if (event.button === 2) {
         isRotating = false;
-        document.exitPointerLock(); // Release pointer lock
+        document.exitPointerLock();
     }
 }
 
 function onMouseMove(event) {
     if (isRotating) {
-        // Use event.movementX/Y for pointer lock, which gives delta movement
         const movementX = event.movementX;
         const movementY = event.movementY;
 
         const xoffset = movementX * CAMERA_SENSITIVITY;
-        const yoffset = -movementY * CAMERA_SENSITIVITY; // Reversed since Y-coordinates go top to bottom on screen
+        const yoffset = -movementY * CAMERA_SENSITIVITY;
 
         cameraYaw += xoffset;
         cameraPitch += yoffset;
 
-        // Clamp pitch to avoid flipping the camera upside down
         if (cameraPitch > 89.0) {
             cameraPitch = 89.0;
         }
@@ -284,26 +371,25 @@ function onMouseMove(event) {
         }
 
         updateCameraPositionFromOrbit();
-        camera.updateBasis(); // Update camera's basis vectors
-        uiManager.updateEyePositionDisplay(camera.eyePosition); // Update UI display
-        render(); // Re-render scene
+        camera.updateBasis();
+        uiManager.updateEyePositionDisplay(camera.eyePosition);
+        render();
     }
 }
 
 function onMouseWheel(event) {
-    event.preventDefault(); // Prevent page scrolling
-    cameraRadius -= event.deltaY * 0.01; // Adjust sensitivity as needed
+    event.preventDefault();
+    cameraRadius -= event.deltaY * 0.01;
 
-    // Clamp radius
     if (cameraRadius < 1.0) cameraRadius = 1.0;
     if (cameraRadius > 20.0) cameraRadius = 20.0;
 
     updateCameraPositionFromOrbit();
-    camera.updateBasis(); // Update camera's basis vectors
-    uiManager.updateEyePositionDisplay(camera.eyePosition); // Update UI display
-    uiManager.cameraControls.orbitRadius.value = cameraRadius.toFixed(1); // Update slider
-    uiManager.cameraValueDisplays.orbitRadiusValue.textContent = cameraRadius.toFixed(1); // Update text
-    render(); // Re-render scene
+    camera.updateBasis();
+    uiManager.updateEyePositionDisplay(camera.eyePosition);
+    uiManager.cameraControls.orbitRadius.value = cameraRadius.toFixed(1);
+    uiManager.cameraValueDisplays.orbitRadiusValue.textContent = cameraRadius.toFixed(1);
+    render();
 }
 
 // --- Rendering Function ---

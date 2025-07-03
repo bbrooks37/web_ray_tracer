@@ -10,9 +10,10 @@ export class Sphere extends Object {
      * @param {Vec3} center - The center point of the sphere.
      * @param {number} radius - The radius of the sphere.
      * @param {Vec3} color - The color of the sphere.
+     * @param {string|null} [textureId=null] - Optional texture ID for this sphere. NEW
      */
-    constructor(center, radius, color) {
-        super(color); // Call the base class constructor with color
+    constructor(center, radius, color, textureId = null) { // Modified constructor signature
+        super(color, '', textureId); // Pass textureId to base constructor
         this.center = center;
         this.radius = radius;
     }
@@ -20,14 +21,6 @@ export class Sphere extends Object {
     /**
      * Implements the ray-sphere intersection test.
      * Uses the quadratic formula to find intersection points.
-     * A ray is defined as P(t) = O + tD, where O is origin, D is direction, t is distance.
-     * A sphere is defined as ||P - C||^2 = R^2, where C is center, R is radius.
-     * Substituting P(t) into the sphere equation gives a quadratic equation in t:
-     * (D . D)t^2 + 2(D . (O - C))t + ((O - C) . (O - C) - R^2) = 0
-     * Let A = D . D (which is 1 if D is normalized)
-     * Let B = 2 * (D . (O - C))
-     * Let C = (O - C) . (O - C) - R^2
-     * The discriminant is delta = B^2 - 4AC
      *
      * @param {Ray} ray - The ray to test for intersection.
      * @returns {{hit: boolean, info: IntersectionInfo|null}} An object indicating if a hit occurred and the intersection info.
@@ -61,7 +54,20 @@ export class Sphere extends Object {
                 const intersectionPoint = ray.pointAt(t);
                 const normal = intersectionPoint.subtract(this.center).normalize(); // Normal points outwards from sphere center
 
-                const info = new IntersectionInfo(intersectionPoint, normal, t);
+                // NEW: Calculate UV coordinates for spherical mapping
+                // Convert normal to spherical coordinates
+                // phi: angle around Y-axis from X-axis (longitude)
+                // theta: angle from Y-axis (latitude)
+                const phi = Math.atan2(normal.z, normal.x);
+                const theta = Math.acos(normal.y);
+
+                // Map to UV space [0, 1]
+                const u = 1 - (phi + Math.PI) / (2 * Math.PI);
+                const v = theta / Math.PI;
+
+                const uvCoords = new Vec3(u, v, 0); // z is 0 for 2D UVs
+
+                const info = new IntersectionInfo(intersectionPoint, normal, t, uvCoords); // Pass UV
                 return { hit: true, info: info };
             }
         }

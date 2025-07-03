@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Web Ray Tracer</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Load JavaScript modules (order matters!) -->
+    <!-- Math utilities first -->
+    <script type="module" src="js/math.js"></script>
+    <!-- Base object and specific shapes -->
+    <script type="module" src="js/object.js"></script>
+    <script type="module" src="js/sphere.js"></script>
+    <script type="module" src="js/plane.js"></script>
+    <!-- Scene components -->
+    <script type="module" src="js/light.js"></script>
+    <script type="module" src="js/camera.js"></script>
+    <script type="module" src="js/scene.js"></script>
+    <!-- Core raytracer logic -->
+    <script type="module" src="js/raytracer.js"></script>
+    <!-- UI handling -->
+    <script type="module" src="js/ui.js"></script>
+    <!-- Main application entry point -->
+    <script type="module" src="js/main.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="canvas-container">
+            <canvas id="raytracerCanvas"></canvas>
+        </div>
+        <div class="controls-panel">
+            <h2>Ray Tracer Controls</h2>
+
+            <div class="control-group">
+                <h3>Camera Properties</h3>
+                <div class="slider-group">
+                    <label for="eyeX">Eye X:</label>
+                    <input type="range" id="eyeX" min="-15" max="15" step="0.1" value="0">
+                    <span id="eyeXValue">0.0</span>
+                </div>
+                <div class="slider-group">
+                    <label for="eyeY">Eye Y:</label>
+                    <input type="range" id="eyeY" min="-15" max="15" step="0.1" value="0">
+                    <span id="eyeYValue">0.0</span>
+                </div>
+                <div class="slider-group">
+                    <label for="eyeZ">Eye Z:</label>
+                    <input type="range" id="eyeZ" min="-15" max="15" step="0.1" value="0">
+                    <span id="eyeZValue">0.0</span>
+                </div>
+
+                <div class="slider-group">
+                    <label for="lookAtX">LookAt X:</label>
+                    <input type="range" id="lookAtX" min="-5" max="5" step="0.1" value="0">
+                    <span id="lookAtXValue">0.0</span>
+                </div>
+                <div class="slider-group">
+                    <label for="lookAtY">LookAt Y:</label>
+                    <input type="range" id="lookAtY" min="-5" max="5" step="0.1" value="0">
+                    <span id="lookAtYValue">0.0</span>
+                </div>
+                <div class="slider-group">
+                    <label for="lookAtZ">LookAt Z:</label>
+                    <input type="range" id="lookAtZ" min="-5" max="5" step="0.1" value="0">
+                    <span id="lookAtZValue">0.0</span>
+                </div>
+
+                <div class="slider-group">
+                    <label for="fov">FOV:</label>
+                    <input type="range" id="fov" min="10" max="120" step="1" value="75">
+                    <span id="fovValue">75</span>
+                </div>
+                <div class="slider-group">
+                    <label for="orbitRadius">Orbit Radius:</label>
+                    <input type="range" id="orbitRadius" min="1" max="20" step="0.1" value="6">
+                    <span id="orbitRadiusValue">6.0</span>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <h3>Selected Object Properties</h3>
+                <p id="selectedObjectInfo">No object selected. Click on a sphere to select it.</p>
+                <div class="color-picker-group" style="display: none;">
+                    <label for="objectColor">Color:</label>
+                    <input type="color" id="objectColor" value="#ff0000">
+                </div>
+                <!-- NEW: Model and Texture Properties for Selected Object -->
+                <div class="model-texture-group" style="display: none;">
+                    <h4>Model:</h4>
+                    <input type="file" id="modelFileInput" accept=".obj">
+                    <p id="modelFileName">No model loaded</p>
+
+                    <h4>Texture:</h4>
+                    <input type="file" id="textureFileInput" accept="image/*">
+                    <p id="textureFileName">No texture applied</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

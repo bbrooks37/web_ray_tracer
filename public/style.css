@@ -1,0 +1,199 @@
+/* public/style.css */
+
+/* Global styles and font */
+body {
+    font-family: 'Inter', sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #1a1a2e; /* Dark background */
+    color: #e0e0e0; /* Light text */
+    display: flex;
+    justify-content: center;
+    align-items: flex-start; /* Align to top for better layout on large screens */
+    min-height: 100vh;
+    overflow-x: hidden; /* Prevent horizontal scroll */
+}
+
+/* Main container for layout */
+.container {
+    display: flex;
+    flex-direction: column; /* Stack vertically on small screens */
+    width: 100%;
+    max-width: 1200px; /* Max width for content */
+    padding: 20px;
+    gap: 20px; /* Space between canvas and controls */
+    box-sizing: border-box;
+}
+
+/* Canvas container for responsiveness */
+.canvas-container {
+    flex-grow: 1; /* Allows canvas to take available space */
+    width: 100%;
+    background-color: #000; /* Black background for raytracer output */
+    border-radius: 12px;
+    overflow: hidden; /* Ensures content stays within rounded corners */
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    aspect-ratio: 4 / 3; /* Maintain 4:3 aspect ratio for the canvas */
+    display: flex; /* Center canvas within its container */
+    justify-content: center;
+    align-items: center;
+}
+
+canvas {
+    display: block;
+    width: 100%; /* Canvas fills its container */
+    height: 100%;
+    /* No explicit background-color here, as raytracer will fill it */
+}
+
+/* Controls panel styling */
+.controls-panel {
+    background-color: #2a2a4a; /* Slightly lighter dark background */
+    padding: 25px;
+    border-radius: 12px;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    width: 100%; /* Full width on small screens */
+    max-width: 400px; /* Max width for controls on larger screens */
+    flex-shrink: 0; /* Prevent shrinking when canvas grows */
+}
+
+.controls-panel h2 {
+    color: #a7d9ff; /* Light blue heading */
+    margin-top: 0;
+    margin-bottom: 25px;
+    text-align: center;
+    font-size: 1.8em;
+}
+
+.control-group {
+    margin-bottom: 25px;
+    padding-bottom: 15px;
+    border-bottom: 1px solid #3a3a5a; /* Subtle separator */
+}
+
+.control-group:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.control-group h3 {
+    color: #c0e0ff; /* Slightly darker light blue */
+    margin-top: 0;
+    margin-bottom: 15px;
+    font-size: 1.3em;
+}
+
+.slider-group, .color-picker-group {
+    display: flex;
+    align-items: center;
+    margin-bottom: 12px;
+    gap: 10px;
+}
+
+.slider-group label, .color-picker-group label {
+    flex-shrink: 0;
+    width: 90px; /* Fixed width for labels */
+    font-size: 0.95em;
+    color: #bbbbbb;
+}
+
+input[type="range"] {
+    flex-grow: 1;
+    -webkit-appearance: none; /* Remove default styling */
+    appearance: none;
+    height: 8px;
+    background: #3a3a5a; /* Track color */
+    outline: none;
+    border-radius: 4px;
+    cursor: grab;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #6a9eff; /* Thumb color */
+    cursor: grab;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #6a9eff;
+    cursor: grab;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+input[type="range"]:active::-webkit-slider-thumb,
+input[type="range"]:active::-moz-range-thumb {
+    cursor: grabbing;
+    background: #8aaeff; /* Active thumb color */
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+
+.slider-group span {
+    width: 50px; /* Fixed width for value display */
+    text-align: right;
+    color: #a7d9ff;
+    font-weight: bold;
+}
+
+#selectedObjectInfo {
+    font-style: italic;
+    color: #999;
+    margin-bottom: 15px;
+    text-align: center;
+}
+
+input[type="color"] {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    border: none;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 8px;
+    cursor: pointer;
+    background-color: transparent; /* Hide default background */
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+    border: none;
+    border-radius: 8px;
+}
+
+input[type="color"]::-moz-color-in-box {
+    border: none;
+    border-radius: 8px;
+}
+
+/* Responsive adjustments */
+@media (min-width: 768px) {
+    .container {
+        flex-direction: row; /* Side-by-side on larger screens */
+        align-items: flex-start;
+    }
+
+    .canvas-container {
+        flex-basis: 65%; /* Canvas takes more space */
+        max-width: 800px; /* Max width for canvas */
+    }
+
+    .controls-panel {
+        flex-basis: 35%; /* Controls panel takes less space */
+        max-width: 350px; /* Adjust max-width for controls */
+    }
+}

@@ -1,8 +1,9 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, signInAnonymously, signInWithCustomToken, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, collection, query, where, addDoc, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-// Also include GLTFLoader as it's a Three.js extension
+import { getFirestore, doc, getDoc, setDoc, collection, query, where, addDoc, getDocs, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+// Also include Three.js core and GLTFLoader as it's a Three.js extension
+import "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
 import "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js";
 
 
@@ -128,9 +129,9 @@ window.signOutUser = async function() {
  * Saves the current 3D scene state to Firestore.
  */
 window.saveProject = async function() {
-    if (!window.userId || !window.db || !window.loadedModel) {
-        console.warn("User not logged in, Firestore not initialized, or no model loaded.");
-        document.getElementById('project-message').textContent = "Please log in and load a model first.";
+    if (!window.userId || !window.db) {
+        console.warn("User not logged in or Firestore not initialized.");
+        document.getElementById('project-message').textContent = "Please log in to save your project.";
         return;
     }
 
@@ -140,23 +141,48 @@ window.saveProject = async function() {
         return;
     }
 
-    // Serialize current scene state
-    const projectData = {
-        modelUrl: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf', // For now, hardcode the model URL
-        position: { x: window.loadedModel.position.x, y: window.loadedModel.position.y, z: window.loadedModel.position.z },
-        rotation: { x: window.loadedModel.rotation.x, y: window.loadedModel.rotation.y, z: window.loadedModel.rotation.z },
-        scale: { x: window.loadedModel.scale.x, y: window.loadedModel.scale.y, z: window.loadedModel.scale.z },
-        // Add any other relevant scene data here (e.g., material changes, light settings)
-        createdAt: new Date(),
-        lastModifiedAt: new Date()
-    };
+    // Serialize current scene components
+    const components = [];
+    scene.traverse(object => {
+        if (object.userData && object.userData.isCustomComponent) {
+            let materialColor = null;
+
+            // Determine the correct color to save
+            if (object.userData.componentType === 'window') {
+                // For window groups, the color is stored in userData.material
+                materialColor = object.userData.material ? object.userData.material.color : null;
+            } else if (object.material) {
+                // For other meshes, check if original material exists (if X-Ray was active)
+                const currentMaterial = originalMaterials.has(object.uuid) ? originalMaterials.get(object.uuid) : object.material;
+                if (currentMaterial && currentMaterial.color) {
+                    materialColor = currentMaterial.color.getHex();
+                }
+            }
+
+            components.push({
+                id: object.uuid, // Use Three.js UUID for unique identification
+                type: object.userData.componentType,
+                geometry: {
+                    width: object.userData.width,
+                    height: object.userData.height,
+                    depth: object.userData.depth
+                },
+                position: { x: object.position.x, y: object.position.y, z: object.position.z },
+                rotation: { x: object.rotation.x, y: object.rotation.y, z: object.rotation.z },
+                scale: { x: object.scale.x, y: object.scale.y, z: object.scale.z },
+                material: { color: materialColor } // Store material color
+            });
+        }
+    });
 
     try {
-        // Store in private user collection
         const projectsCollectionRef = collection(window.db, `artifacts/${appId}/users/${window.userId}/projects`);
         await addDoc(projectsCollectionRef, {
             projectName: projectName,
-            sceneData: JSON.stringify(projectData) // Store as string to handle complex objects
+            sceneData: JSON.stringify(components),
+            createdAt: serverTimestamp(),
+            lastModifiedAt: serverTimestamp(),
+            isXRayMode: isXRayMode // Save the X-Ray mode state
         });
         document.getElementById('project-message').textContent = `Project "${projectName}" saved successfully!`;
         console.log("Project saved:", projectName);
@@ -254,60 +280,101 @@ window.loadSpecificProject = async function(projectId) {
 
         if (projectDocSnap.exists()) {
             const projectData = projectDocSnap.data();
-            const sceneData = JSON.parse(projectData.sceneData); // Parse the stored JSON string
+            const components = JSON.parse(projectData.sceneData); // Parse the stored JSON string (now only components)
+            const savedIsXRayMode = projectData.isXRayMode || false; // Get saved X-Ray mode state
 
-            // Remove existing model if any
-            if (window.loadedModel) {
-                window.scene.remove(window.loadedModel);
-                window.loadedModel.traverse(child => {
-                    if (child.isMesh) {
-                        child.geometry.dispose();
-                        if (Array.isArray(child.material)) {
-                            child.material.forEach(m => m.dispose());
-                        } else {
-                            child.material.dispose();
-                        }
+            // Clear existing custom components from the scene
+            window.clearCustomComponents();
+
+            // Reconstruct the scene from saved components
+            if (components && components.length > 0) {
+                components.forEach(compData => {
+                    let geometry;
+                    let material;
+                    let mesh;
+
+                    // Recreate material color
+                    const loadedColor = compData.material && compData.material.color !== undefined ? compData.material.color : DEFAULT_MATERIAL_COLOR;
+
+                    // Recreate geometry based on type and dimensions
+                    if (compData.type === 'wall' || compData.type === 'floor' || compData.type === 'cube' || compData.type === 'roof') {
+                        geometry = new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth);
+                        material = new THREE.MeshStandardMaterial({ color: loadedColor });
+                        mesh = new THREE.Mesh(geometry, material);
+                    } else if (compData.type === 'window') {
+                        const width = compData.geometry.width;
+                        const height = compData.geometry.height;
+                        const depth = compData.geometry.depth;
+                        const frameThickness = 0.1;
+                        const glassThickness = 0.01;
+
+                        const windowGroup = new THREE.Group();
+                        windowGroup.userData.isCustomComponent = true;
+                        windowGroup.userData.componentType = compData.type;
+                        windowGroup.userData.width = width;
+                        windowGroup.userData.height = height;
+                        windowGroup.userData.depth = depth;
+
+                        // Glass pane
+                        const glassGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, glassThickness);
+                        const glassMaterial = new THREE.MeshStandardMaterial({
+                            color: loadedColor, // Use loaded color for glass
+                            transparent: true,
+                            opacity: 0.5,
+                            roughness: 0.1,
+                            metalness: 0.1
+                        });
+                        const glassMesh = new THREE.Mesh(glassGeometry, glassMaterial);
+                        glassMesh.position.z = 0;
+                        windowGroup.add(glassMesh);
+
+                        // Frame parts (4 pieces)
+                        const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); // Brown for wood frame
+                        const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+                        topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
+                        windowGroup.add(topFrame);
+                        const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+                        bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
+                        windowGroup.add(bottomFrame);
+                        const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+                        leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
+                        windowGroup.add(leftFrame);
+                        const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+                        rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
+                        windowGroup.add(rightFrame);
+
+                        mesh = windowGroup;
+                        mesh.userData.material = { color: loadedColor }; // Store the color on the group's userData
                     }
+                    else {
+                        console.warn(`Unknown component type: ${compData.type}`);
+                        return; // Skip unknown types
+                    }
+
+                    // Apply transformations
+                    mesh.position.set(compData.position.x, compData.position.y, compData.position.z);
+                    mesh.rotation.set(compData.rotation.x, compData.rotation.y, compData.rotation.z);
+                    mesh.scale.set(compData.scale.x, compData.scale.y, compData.scale.z);
+
+                    scene.add(mesh);
                 });
-                window.loadedModel = null;
             }
 
-            // Load the model from the saved URL
-            const loader = new THREE.GLTFLoader();
-            document.getElementById('model-status').textContent = `Loading saved model...`;
-            window.loadingOverlay.style.display = 'flex';
+            // Apply X-Ray mode if it was saved as active
+            if (savedIsXRayMode && !isXRayMode) { // Only toggle if current mode is different
+                window.toggleXRayMode();
+            } else if (!savedIsXRayMode && isXRayMode) { // If it was off but currently on, turn off
+                window.toggleXRayMode();
+            }
 
-            loader.load(
-                sceneData.modelUrl,
-                function (gltf) {
-                    window.loadedModel = gltf.scene;
-                    window.scene.add(window.loadedModel);
 
-                    // Apply saved transformations
-                    window.loadedModel.position.set(sceneData.position.x, sceneData.position.y, sceneData.position.z);
-                    window.loadedModel.rotation.set(sceneData.rotation.x, sceneData.rotation.y, sceneData.rotation.z);
-                    window.loadedModel.scale.set(sceneData.scale.x, sceneData.scale.y, sceneData.scale.z);
+            document.getElementById('model-status').textContent = `Loaded: ${projectData.projectName}`;
+            window.loadingOverlay.style.display = 'none';
+            document.getElementById('project-message').textContent = `Project "${projectData.projectName}" loaded successfully!`;
+            console.log("Project loaded:", projectData.projectName);
 
-                    // Recalculate camera target based on loaded model's new position
-                    const box = new THREE.Box3().setFromObject(window.loadedModel);
-                    window.cameraTarget.copy(box.getCenter(new THREE.Vector3()));
-                    window.camera.lookAt(window.cameraTarget); // Make camera look at the model's center
-
-                    document.getElementById('model-status').textContent = `Loaded: ${projectData.projectName}`;
-                    window.loadingOverlay.style.display = 'none';
-                    document.getElementById('project-message').textContent = `Project "${projectData.projectName}" loaded successfully!`;
-                    console.log("Project loaded:", projectData.projectName);
-                },
-                undefined, // Progress callback
-                function (error) {
-                    document.getElementById('model-status').textContent = "Error loading saved model.";
-                    window.loadingOverlay.style.display = 'none';
-                    document.getElementById('project-message').textContent = `Error loading saved model: ${error.message}`;
-                    console.error('An error occurred loading the saved model:', error);
-                    window.addFallbackBox(); // Add fallback if saved model fails to load
-                }
-            );
-
+            // Clear any selection after loading a new project
+            window.deselectObject();
         } else {
             document.getElementById('project-message').textContent = "Project not found.";
             console.warn("Project not found:", projectId);
@@ -324,7 +391,7 @@ window.loadSpecificProject = async function(projectId) {
  */
 window.deleteProject = async function(projectId) {
     if (!window.userId || !window.db) {
-        console.warn("User not logged in or Firestore not initialized. Cannot delete project.");
+        console.warn("User not logged in or Firestore not initialized.");
         return;
     }
     try {
@@ -361,19 +428,18 @@ window.showConfirmModal = function(message, onConfirm) {
     };
 };
 
-// Global variables for Three.js scene (moved from index.html)
+// Global variables for Three.js scene
 let scene, camera, renderer;
-let loadedModel = null; // Variable to hold the loaded 3D model (e.g., GLTF scene)
 let cameraTarget = new THREE.Vector3(0, 0, 0); // The point the camera orbits around
 
-// Camera controls (moved from index.html)
-let isDragging = false;
+// Camera controls
+let isDraggingCamera = false; // Renamed from isDragging to avoid conflict with object dragging
 let previousMouseX = 0;
 let previousMouseY = 0;
 let rotationSpeed = 0.005;
 let zoomSpeed = 0.1;
 
-// UI Elements (moved from index.html)
+// UI Elements
 const modelStatusElement = document.getElementById('model-status');
 const loadingOverlay = document.getElementById('loading-overlay');
 
@@ -397,10 +463,58 @@ const CAMERA_HEIGHT = 1.6; // Approximate human eye height for walk mode
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
+// --- Phase 4: Building Tools & Selection Variables ---
+let selectedObject = null; // Currently selected THREE.Mesh object
+let selectionOutline = null; // Helper for visual selection
+const SELECTION_COLOR = 0xffff00; // Yellow for selection highlight
+const DEFAULT_MATERIAL_COLOR = 0x888888; // Default color for new objects
+let isXRayMode = false; // New variable for X-Ray mode
+
+// Store original materials for X-Ray toggle
+const originalMaterials = new Map();
+
+
+// UI elements for selected object properties
+let propTypeElement;
+let propPositionElement;
+let propRotationElement;
+let propScaleElement;
+let colorPickerElement;
+
+// Input elements for dimensions
+let dimWidthInput;
+let dimHeightInput;
+let dimDepthInput;
+
+
+// --- Phase 5: Enhanced Navigation, Building, and Visuals Variables ---
+let objectMoveForward = false;
+let objectMoveBackward = false;
+let objectMoveLeft = false;
+let objectMoveRight = false;
+let objectMoveUp = false;
+let objectMoveDown = false;
+const OBJECT_MOVE_SPEED = 0.5; // Speed for moving selected objects
+let objectRotateLeft = false;
+let objectRotateRight = false;
+const OBJECT_ROTATION_SPEED = Math.PI / 32; // Rotation speed in radians (e.g., 5.625 degrees per step)
+
+// --- Phase 7: Drawing Mode Variables ---
+let isDrawing = false;
+let drawingType = ''; // 'wall' or 'floor'
+let drawingStartPoint = new THREE.Vector3();
+let currentDrawingLine = null; // The temporary dotted line
+const DRAWING_LINE_COLOR = 0x00ffff; // Cyan for drawing preview
+const DRAWING_LINE_DASH_SIZE = 0.5;
+const DRAWING_LINE_GAP_SIZE = 0.2;
+
+let isDraggingObject = false; // New flag for dragging objects
+let dragOffset = new THREE.Vector3(); // Offset from object center to click point
+let dragPlane = new THREE.Plane(); // Plane for dragging (parallel to ground)
+
 
 /**
  * Sets up the Three.js scene, camera, and renderer.
- * Initializes GLTFLoader and attempts to load a model.
  * This function is now called AFTER Firebase authentication is ready.
  */
 window.setupScene = function() {
@@ -411,9 +525,23 @@ window.setupScene = function() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a202c); // Dark background matching body
 
+    // Add Skybox for a more natural environment
+    const cubeTextureLoader = new THREE.CubeTextureLoader();
+    const skyboxTexture = cubeTextureLoader.load([
+        'https://threejs.org/examples/textures/cube/Bridge2/posx.jpg',
+        'https://threejs.org/examples/textures/cube/Bridge2/negx.jpg',
+        'https://threejs.org/examples/textures/cube/Bridge2/posy.jpg',
+        'https://threejs.org/examples/textures/cube/Bridge2/negy.jpg',
+        'https://threejs.org/examples/textures/cube/Bridge2/posz.jpg',
+        'https://threejs.org/examples/textures/cube/Bridge2/negz.jpg'
+    ]);
+    scene.background = skyboxTexture;
+
+
     // Camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 20, 50); // Initial camera position (will be adjusted after model load)
+    camera.position.set(0, 10, 20); // Initial camera position for an empty scene
+    camera.lookAt(0, 0, 0);
 
     // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -427,6 +555,12 @@ window.setupScene = function() {
     directionalLight.position.set(1, 1, 1).normalize();
     scene.add(directionalLight);
 
+    // Add a second directional light for better overall illumination
+    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+    directionalLight2.position.set(-1, -1, -1).normalize();
+    scene.add(directionalLight2);
+
+
     // Ground Plane
     const planeGeometry = new THREE.PlaneGeometry(100, 100);
     const planeMaterial = new THREE.MeshStandardMaterial({
@@ -438,63 +572,13 @@ window.setupScene = function() {
     const plane = new THREE.Mesh(planeGeometry, planeMaterial);
     plane.rotation.x = Math.PI / 2; // Rotate to be horizontal
     plane.position.y = -0.01; // Slightly below 0
+    plane.name = 'groundPlane'; // Give it a name for raycasting
     scene.add(plane);
 
-    // --- Model Loading ---
-    const loader = new THREE.GLTFLoader();
+    // Add AxesHelper
+    const axesHelper = new THREE.AxesHelper(10); // Size of the axes
+    scene.add(axesHelper);
 
-    // Sample GLTF model URL (a simple helmet from Khronos Group)
-    const modelUrl = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf';
-
-    loader.load(
-        modelUrl,
-        function (gltf) {
-            // Model loaded successfully
-            loadedModel = gltf.scene;
-            scene.add(loadedModel);
-
-            // --- Auto-scale and center the loaded model ---
-            const box = new THREE.Box3().setFromObject(loadedModel);
-            const center = box.getCenter(new THREE.Vector3());
-            const size = box.getSize(new THREE.Vector3());
-
-            // Adjust model position so its center is at (0,0,0)
-            loadedModel.position.x += (loadedModel.position.x - center.x);
-            loadedModel.position.y += (loadedModel.position.y - center.y);
-            loadedModel.position.z += (loadedModel.position.z - center.z);
-
-            // Set camera target to the new center of the model
-            cameraTarget.copy(loadedModel.position);
-
-            // Calculate optimal camera distance to frame the model
-            const maxDim = Math.max(size.x, size.y, size.z);
-            const fov = camera.fov * (Math.PI / 180);
-            let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-            cameraZ *= 1.5; // Add some padding
-
-            // Set camera initial position relative to the model's center
-            camera.position.set(cameraTarget.x, cameraTarget.y + maxDim * 0.5, cameraTarget.z + cameraZ);
-            camera.lookAt(cameraTarget); // Make camera look at the model's center
-
-            modelStatusElement.textContent = "Loaded: Damaged Helmet";
-            loadingOverlay.style.display = 'none'; // Hide loading overlay
-            console.log('Model loaded:', gltf);
-        },
-        // Called while loading is progressing
-        function (xhr) {
-            const progress = (xhr.loaded / xhr.total * 100).toFixed(2);
-            modelStatusElement.textContent = `Loading... ${progress}%`;
-            console.log(`Model loading: ${progress}% loaded`);
-        },
-        // Called when loading has errors
-        function (error) {
-            modelStatusElement.textContent = "Error loading model.";
-            loadingOverlay.style.display = 'none'; // Hide loading overlay
-            console.error('An error occurred loading the model:', error);
-            // Fallback to a simple box if model loading fails
-            window.addFallbackBox();
-        }
-    );
 
     // Event Listeners for camera controls
     renderer.domElement.addEventListener('mousedown', onMouseDown);
@@ -503,66 +587,55 @@ window.setupScene = function() {
     renderer.domElement.addEventListener('wheel', onMouseWheel);
     window.addEventListener('resize', onWindowResize);
 
-    // Event Listeners for Walk Mode (Keyboard)
+    // Event Listeners for Walk Mode (Keyboard) and Object Movement
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
-    // Event listener for measurement clicks
+    // Event listener for interaction (selection, measurement, drawing, dragging)
     renderer.domElement.addEventListener('click', onCanvasClick);
+    renderer.domElement.addEventListener('mousemove', onCanvasMouseMove); // For drawing/dragging previews
+    renderer.domElement.addEventListener('mouseup', onCanvasMouseUp); // For ending drawing/dragging
 
-    // Add UI elements for Phase 3
-    const appSection = document.getElementById('app-section');
-    const toolsHtml = `
-        <h4>Tools</h4>
-        <div class="form-group">
-            <button class="btn btn-secondary" id="toggle-walk-mode-btn">Toggle Walk Mode</button>
-            <button class="btn btn-secondary" id="measure-distance-btn">Measure Distance</button>
-        </div>
-        <p>Distance: <span id="measurement-distance">N/A</span></p>
-        <p>Midpoint: <span id="measurement-midpoint">N/A</span></p>
-    `;
-    appSection.insertAdjacentHTML('beforeend', toolsHtml);
-
-    document.getElementById('toggle-walk-mode-btn').addEventListener('click', window.toggleWalkMode);
-    document.getElementById('measure-distance-btn').addEventListener('click', window.toggleMeasurementMode);
 
     // Get UI elements for measurement
     window.measurementDistanceElement = document.getElementById('measurement-distance');
     window.measurementMidpointElement = document.getElementById('measurement-midpoint');
+
+    // Get UI elements for selected object properties
+    propTypeElement = document.getElementById('prop-type');
+    propPositionElement = document.getElementById('prop-position');
+    propRotationElement = document.getElementById('prop-rotation');
+    propScaleElement = document.getElementById('prop-scale');
+    colorPickerElement = document.getElementById('color-picker');
+
+    // Get input elements for dimensions
+    dimWidthInput = document.getElementById('dim-width');
+    dimHeightInput = document.getElementById('dim-height');
+    dimDepthInput = document.getElementById('dim-depth');
 };
 
 /**
- * Adds a simple box as a fallback if external model loading fails.
+ * Clears all custom components from the scene.
  */
-window.addFallbackBox = function() {
-    const geometry = new THREE.BoxGeometry(10, 10, 10);
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x9f7aea,
-        emissive: 0x5500ff,
-        emissiveIntensity: 0.2,
-        roughness: 0.3,
-        metalness: 0.5
+window.clearCustomComponents = function() {
+    const componentsToRemove = [];
+    scene.traverse(object => {
+        if (object.userData && object.userData.isCustomComponent) {
+            componentsToRemove.push(object);
+        }
     });
-    loadedModel = new THREE.Mesh(geometry, material);
-    scene.add(loadedModel);
 
-    // Center and position camera for the fallback box
-    const box = new THREE.Box3().setFromObject(loadedModel);
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-
-    loadedModel.position.x += (loadedModel.position.x - center.x);
-    loadedModel.position.y += (loadedModel.position.y - center.y);
-    loadedModel.position.z += (loadedModel.position.z - center.z);
-
-    cameraTarget.copy(loadedModel.position);
-
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const fov = camera.fov * (Math.PI / 180);
-    let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-    cameraZ *= 1.5;
-
-    camera.position.set(cameraTarget.x, cameraTarget.y + maxDim * 0.5, cameraTarget.z + cameraZ);
-    camera.lookAt(cameraTarget);
+    componentsToRemove.forEach(object => {
+        scene.remove(object);
+        if (object.geometry) object.geometry.dispose();
+        if (object.material) {
+            if (Array.isArray(object.material)) {
+                object.material.forEach(m => m.dispose());
+            } else {
+                object.material.dispose();
+            }
+        }
+    });
+    window.deselectObject(); // Deselect any active selection
 };
 
 
@@ -576,28 +649,59 @@ function onWindowResize() {
 }
 
 /**
- * Handles mouse down event for camera rotation (Orbit Mode).
+ * Handles mouse down event for camera rotation (Orbit Mode) or starting object drag.
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseDown(event) {
-    if (!isWalkMode) { // Only orbit if not in walk mode
-        isDragging = true;
-        previousMouseX = event.clientX;
-        previousMouseY = event.clientY;
+    if (isWalkMode) return; // No orbit dragging in walk mode
+
+    // Check if we're clicking on a selectable object to start dragging
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects(scene.children, true); // Intersect with all children
+
+    if (intersects.length > 0) {
+        const clickedObject = intersects[0].object;
+        let actualSelectedObject = clickedObject;
+
+        // If the clicked object is part of a group (like a window), select the group
+        if (clickedObject.parent && clickedObject.parent.userData && clickedObject.parent.userData.isCustomComponent) {
+            actualSelectedObject = clickedObject.parent;
+        }
+
+        if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
+            window.selectObject(actualSelectedObject); // Select the object
+            isDraggingObject = true;
+            // Calculate offset from object center to click point
+            dragOffset.subVectors(intersects[0].point, actualSelectedObject.position);
+            // Set up a plane for consistent dragging
+            dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(dragPlane.normal).negate(), intersects[0].point);
+            renderer.domElement.style.cursor = 'grabbing';
+            return; // Don't start camera drag if object drag is initiated
+        }
     }
+
+    // If no object drag, start camera drag
+    isDraggingCamera = true;
+    previousMouseX = event.clientX;
+    previousMouseY = event.clientY;
+    renderer.domElement.style.cursor = 'grab';
 }
 
 /**
- * Handles mouse up event to stop camera rotation (Orbit Mode).
+ * Handles mouse up event to stop camera rotation or object drag.
  */
 function onMouseUp() {
-    if (!isWalkMode) {
-        isDragging = false;
+    if (isDraggingCamera) {
+        isDraggingCamera = false;
+        renderer.domElement.style.cursor = 'auto';
     }
 }
 
 /**
- * Handles mouse move event for camera rotation (Orbit Mode) or look (Walk Mode).
+ * Handles mouse move event for camera rotation (Orbit Mode) or object dragging.
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseMove(event) {
@@ -612,10 +716,8 @@ function onMouseMove(event) {
         // Rotate camera's pitch (around local X-axis)
         camera.rotation.x -= movementY * rotationSpeed;
         camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x)); // Clamp pitch
-    } else {
+    } else if (isDraggingCamera) {
         // Orbit controls
-        if (!isDragging) return;
-
         const deltaX = event.clientX - previousMouseX;
         const deltaY = event.clientY - previousMouseY;
 
@@ -664,32 +766,85 @@ function onMouseWheel(event) {
 }
 
 /**
- * Handles keyboard key down events for first-person movement.
+ * Handles keyboard key down events for first-person movement or object movement.
  * @param {KeyboardEvent} event - The keyboard event.
  */
 function onKeyDown(event) {
-    if (!isWalkMode) return;
-    switch (event.code) {
-        case 'KeyW': moveForward = true; break;
-        case 'KeyS': moveBackward = true; break;
-        case 'KeyA': moveLeft = true; break;
-        case 'KeyD': moveRight = true; break;
+    if (isWalkMode) {
+        switch (event.code) {
+            case 'KeyW': moveForward = true; break;
+            case 'KeyS': moveBackward = true; break;
+            case 'KeyA': moveLeft = true; break;
+            case 'KeyD': moveRight = true; break;
+        }
+    } else if (selectedObject) { // Object movement when an object is selected and not in walk mode
+        switch (event.code) {
+            case 'ArrowUp': objectMoveForward = true; break;
+            case 'ArrowDown': objectMoveBackward = true; break;
+            case 'ArrowLeft':
+                if (event.shiftKey) { objectRotateLeft = true; } // Shift + Left Arrow for rotation
+                else { objectMoveLeft = true; } // Left Arrow for movement
+                break;
+            case 'ArrowRight':
+                if (event.shiftKey) { objectRotateRight = true; } // Shift + Right Arrow for rotation
+                else { objectMoveRight = true; } // Right Arrow for movement
+                break;
+            case 'BracketRight': objectMoveUp = true; break; // ']' key
+            case 'BracketLeft': objectMoveDown = true; break; // '[' key
+        }
     }
 }
 
 /**
- * Handles keyboard key up events for first-person movement.
+ * Handles keyboard key up events for first-person movement or object movement.
  * @param {KeyboardEvent} event - The keyboard event.
  */
 function onKeyUp(event) {
-    if (!isWalkMode) return;
-    switch (event.code) {
-        case 'KeyW': moveForward = false; break;
-        case 'KeyS': moveBackward = false; break;
-        case 'KeyA': moveLeft = false; break;
-        case 'KeyD': moveRight = false; break;
+    if (isWalkMode) {
+        switch (event.code) {
+            case 'KeyW': moveForward = false; break;
+            case 'KeyS': moveBackward = false; break;
+            case 'KeyA': moveLeft = false; break;
+            case 'KeyD': moveRight = false; break;
+        }
+    } else if (selectedObject) {
+        switch (event.code) {
+            case 'ArrowUp': objectMoveForward = false; break;
+            case 'ArrowDown': objectMoveBackward = false; break;
+            case 'ArrowLeft': objectMoveLeft = false; objectRotateLeft = false; break;
+            case 'ArrowRight': objectMoveRight = false; objectRotateRight = false; break;
+            case 'BracketRight': objectMoveUp = false; break;
+            case 'BracketLeft': objectMoveDown = false; break;
+        }
     }
 }
+
+/**
+ * Updates the UI display for the selected object's properties.
+ */
+function updateSelectedObjectPropertiesUI() {
+    if (selectedObject) {
+        propTypeElement.textContent = selectedObject.userData.componentType || 'Unknown';
+        propPositionElement.textContent = `X: ${selectedObject.position.x.toFixed(2)}, Y: ${selectedObject.position.y.toFixed(2)}, Z: ${selectedObject.position.z.toFixed(2)}`;
+        // Display rotation in degrees for user-friendliness
+        propRotationElement.textContent = `X: ${(selectedObject.rotation.x * 180 / Math.PI).toFixed(1)}°, Y: ${(selectedObject.rotation.y * 180 / Math.PI).toFixed(1)}°, Z: ${(selectedObject.rotation.z * 180 / Math.PI).toFixed(1)}°`;
+        propScaleElement.textContent = `X: ${selectedObject.scale.x.toFixed(2)}, Y: ${selectedObject.scale.y.toFixed(2)}, Z: ${selectedObject.scale.z.toFixed(2)}`;
+        // Ensure color picker reflects the current color
+        if (selectedObject.material && selectedObject.material.color) {
+            colorPickerElement.value = `#${selectedObject.material.color.getHexString()}`;
+        } else if (selectedObject.userData.material && selectedObject.userData.material.color !== undefined) {
+            // For groups like windows, use the stored color
+            colorPickerElement.value = `#${new THREE.Color(selectedObject.userData.material.color).getHexString()}`;
+        }
+    } else {
+        propTypeElement.textContent = 'N/A';
+        propPositionElement.textContent = 'N/A';
+        propRotationElement.textContent = 'N/A';
+        propScaleElement.textContent = 'N/A';
+        colorPickerElement.value = '#9f7aea'; // Reset to default color
+    }
+}
+
 
 /**
  * Toggles between orbit mode and first-person walk mode.
@@ -720,23 +875,26 @@ window.toggleWalkMode = function() {
         if (document.exitPointerLock) {
             document.exitPointerLock();
         }
-        // Reset camera to orbit view (re-center on model)
-        if (loadedModel) {
-            const box = new THREE.Box3().setFromObject(loadedModel);
-            cameraTarget.copy(box.getCenter(new THREE.Vector3()));
-            const size = box.getSize(new THREE.Vector3());
-            const maxDim = Math.max(size.x, size.y, size.z);
-            const fov = camera.fov * (Math.PI / 180);
-            let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-            cameraZ *= 1.5;
-            camera.position.set(cameraTarget.x, cameraTarget.y + maxDim * 0.5, cameraTarget.z + cameraZ);
-            camera.lookAt(cameraTarget);
+        // Reset camera to orbit view (re-center on a reasonable point if no model)
+        if (selectedObject) { // If an object is selected, orbit around it
+            cameraTarget.copy(selectedObject.position);
+            camera.position.set(selectedObject.position.x + 10, selectedObject.position.y + 10, selectedObject.position.z + 20);
+        } else { // Default orbit position
+            cameraTarget.set(0,0,0);
+            camera.position.set(0, 10, 20);
         }
+        camera.lookAt(cameraTarget);
     }
     // Disable measurement mode if entering walk mode
     if (isWalkMode && isMeasuring) {
         window.toggleMeasurementMode();
     }
+    // Disable drawing mode if entering walk mode
+    if (isWalkMode && isDrawing) {
+        window.cancelDrawing();
+    }
+    // Deselect any object when changing modes
+    window.deselectObject();
 };
 
 /**
@@ -757,7 +915,70 @@ window.toggleMeasurementMode = function() {
     if (isMeasuring && isWalkMode) {
         window.toggleWalkMode();
     }
+    // Disable drawing mode if entering measurement mode
+    if (isMeasuring && isDrawing) {
+        window.cancelDrawing();
+    }
+    // Deselect any object when changing modes
+    window.deselectObject();
 };
+
+/**
+ * Toggles X-Ray view mode for custom components.
+ */
+window.toggleXRayMode = function() {
+    isXRayMode = !isXRayMode;
+    const xrayBtn = document.getElementById('toggle-xray-btn');
+
+    scene.traverse(object => {
+        if (object.userData && object.userData.isCustomComponent) {
+            // Handle groups (like windows)
+            if (object instanceof THREE.Group) {
+                object.traverse(child => {
+                    if (child instanceof THREE.Mesh && child.material) {
+                        if (isXRayMode) {
+                            if (!originalMaterials.has(child.uuid)) {
+                                originalMaterials.set(child.uuid, child.material);
+                            }
+                            child.material = new THREE.MeshBasicMaterial({
+                                color: child.material.color,
+                                transparent: true,
+                                opacity: 0.2,
+                                wireframe: true
+                            });
+                        } else {
+                            if (originalMaterials.has(child.uuid)) {
+                                child.material = originalMaterials.get(child.uuid);
+                                originalMaterials.delete(child.uuid);
+                            }
+                        }
+                    }
+                });
+            } else if (object instanceof THREE.Mesh && object.material) { // Handle single meshes
+                if (isXRayMode) {
+                    if (!originalMaterials.has(object.uuid)) {
+                        originalMaterials.set(object.uuid, object.material);
+                    }
+                    object.material = new THREE.MeshBasicMaterial({
+                        color: object.material.color,
+                        transparent: true,
+                        opacity: 0.2,
+                        wireframe: true
+                    });
+                } else {
+                    if (originalMaterials.has(object.uuid)) {
+                        object.material = originalMaterials.get(object.uuid);
+                        originalMaterials.delete(object.uuid);
+                    }
+                }
+            }
+        }
+    });
+
+    xrayBtn.textContent = isXRayMode ? "Exit X-Ray View" : "Toggle X-Ray View";
+    document.getElementById('model-status').textContent = isXRayMode ? "X-Ray View ON" : "X-Ray View OFF";
+};
+
 
 /**
  * Clears all visual measurement points and resets display.
@@ -779,11 +1000,12 @@ window.clearMeasurements = function() {
 };
 
 /**
- * Handles clicks on the canvas for measurement.
+ * Handles clicks on the canvas for measurement or selection.
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasClick(event) {
-    if (!isMeasuring) return;
+    // If dragging for orbit controls or object dragging, don't trigger selection/measurement click
+    if (isDraggingCamera || isDraggingObject) return;
 
     // Calculate mouse position in normalized device coordinates (-1 to +1)
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -792,61 +1014,551 @@ function onCanvasClick(event) {
     // Update the raycaster with the camera and mouse position
     raycaster.setFromCamera(mouse, camera);
 
-    // Calculate objects intersecting the ray
-    const intersects = raycaster.intersectObjects(scene.children, true); // true for recursive check
+    // Intersect only with custom components and the ground plane
+    const interactableObjects = [];
+    scene.traverse(object => {
+        if (object.userData && object.userData.isCustomComponent) {
+            interactableObjects.push(object);
+        }
+        // Also include the ground plane for measurement clicks/drawing
+        if (object.name === 'groundPlane') {
+            interactableObjects.push(object);
+        }
+    });
 
-    if (intersects.length > 0) {
-        const intersectionPoint = intersects[0].point;
+    const intersects = raycaster.intersectObjects(interactableObjects, true);
 
-        // Add point to selected points
-        selectedMeasurementPoints.push(intersectionPoint);
+    if (isDrawing) {
+        if (intersects.length > 0) {
+            const intersectionPoint = intersects[0].point;
+            // For drawing, the first click sets the start point
+            drawingStartPoint.copy(intersectionPoint);
+            document.getElementById('model-status').textContent = `Drawing ${drawingType}: Click and drag to define dimensions.`;
+        } else {
+            document.getElementById('project-message').textContent = "Click on the ground plane to start drawing.";
+            window.cancelDrawing(); // Cancel if clicked elsewhere
+        }
+    } else if (isMeasuring) {
+        if (intersects.length > 0) {
+            const intersectionPoint = intersects[0].point;
 
-        // Visualize the selected point
-        const sphereGeometry = new THREE.SphereGeometry(MEASUREMENT_SPHERE_RADIUS, 16, 16);
-        const sphereMaterial = new THREE.MeshBasicMaterial({ color: MEASUREMENT_LINE_COLOR });
-        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-        sphere.position.copy(intersectionPoint);
-        scene.add(sphere);
-        measurementSpheres.push(sphere);
-
-        if (selectedMeasurementPoints.length === 2) {
-            // Calculate distance
-            const p1 = selectedMeasurementPoints[0];
-            const p2 = selectedMeasurementPoints[1];
-            const distance = p1.distanceTo(p2);
-            window.measurementDistanceElement.textContent = `${distance.toFixed(2)} units`;
-
-            // Calculate midpoint
-            const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-            window.measurementMidpointElement.textContent = `(${midpoint.x.toFixed(2)}, ${midpoint.y.toFixed(2)}, ${midpoint.z.toFixed(2)})`;
-
-            // Draw a line between the two points
-            const lineMaterial = new THREE.LineBasicMaterial({ color: MEASUREMENT_LINE_COLOR });
-            const points = [];
-            points.push(p1);
-            points.push(p2);
-            const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
-            const line = new THREE.Line(lineGeometry, lineMaterial);
-            line.name = 'measurementLine'; // Give it a name to easily remove later
-            scene.add(line);
-
-            // Reset for next measurement after a short delay or explicit clear
-            // For now, we'll keep the points, user can click "Exit Measurement" to clear
-            // or we could add a "Clear Measurement" button.
-            // For simplicity, let's clear after displaying.
-            setTimeout(() => {
-                window.clearMeasurements();
-            }, 3000); // Clear after 3 seconds
-        } else if (selectedMeasurementPoints.length > 2) {
-            // If more than 2 points are selected, clear and start new measurement
-            window.clearMeasurements();
-            // Re-add the current click as the first point of a new measurement
             selectedMeasurementPoints.push(intersectionPoint);
-            scene.add(sphere); // Re-add the sphere for the new first point
+
+            const sphereGeometry = new THREE.SphereGeometry(MEASUREMENT_SPHERE_RADIUS, 16, 16);
+            const sphereMaterial = new THREE.MeshBasicMaterial({ color: MEASUREMENT_LINE_COLOR });
+            const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+            sphere.position.copy(intersectionPoint);
+            scene.add(sphere);
             measurementSpheres.push(sphere);
+
+            if (selectedMeasurementPoints.length === 2) {
+                const p1 = selectedMeasurementPoints[0];
+                const p2 = selectedMeasurementPoints[1];
+                const distance = p1.distanceTo(p2);
+                window.measurementDistanceElement.textContent = `${distance.toFixed(2)} units`;
+
+                const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+                window.measurementMidpointElement.textContent = `(${midpoint.x.toFixed(2)}, ${midpoint.y.toFixed(2)}, ${midpoint.z.toFixed(2)})`;
+
+                const lineMaterial = new THREE.LineBasicMaterial({ color: MEASUREMENT_LINE_COLOR });
+                const points = [];
+                points.push(p1);
+                points.push(p2);
+                const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+                const line = new THREE.Line(lineGeometry, lineMaterial);
+                line.name = 'measurementLine';
+                scene.add(line);
+
+                setTimeout(() => {
+                    window.clearMeasurements();
+                }, 3000);
+            } else if (selectedMeasurementPoints.length > 2) {
+                window.clearMeasurements();
+                selectedMeasurementPoints.push(intersectionPoint); // Start new measurement with current click
+                scene.add(sphere);
+                measurementSpheres.push(sphere);
+            }
+        }
+    } else { // Selection mode
+        if (intersects.length > 0) {
+            const clickedObject = intersects[0].object;
+            let actualSelectedObject = clickedObject;
+
+            // If the clicked object is part of a group (like a window), select the group
+            if (clickedObject.parent && clickedObject.parent.userData && clickedObject.parent.userData.isCustomComponent) {
+                actualSelectedObject = clickedObject.parent;
+            }
+
+            // Ensure we only select our custom components, not the ground plane or lights
+            if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
+                window.selectObject(actualSelectedObject);
+            } else {
+                window.deselectObject();
+            }
+        } else {
+            window.deselectObject();
         }
     }
 }
+
+/**
+ * Handles mouse move event for drawing preview or object dragging.
+ * @param {MouseEvent} event - The mouse event.
+ */
+function onCanvasMouseMove(event) {
+    // Update mouse coordinates
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+
+    if (isDrawing && drawingStartPoint.x !== undefined) {
+        const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane'));
+        if (intersects.length > 0) {
+            const currentPoint = intersects[0].point;
+            window.updateDrawing(currentPoint);
+        }
+    } else if (isDraggingObject && selectedObject) {
+        const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane')); // Dragging on ground plane
+        if (intersects.length > 0) {
+            const newPosition = intersects[0].point.clone().sub(dragOffset);
+            // Keep object at its original Y-level relative to its base
+            selectedObject.position.x = newPosition.x;
+            selectedObject.position.z = newPosition.z;
+            // Update UI
+            updateSelectedObjectPropertiesUI();
+        }
+    }
+}
+
+/**
+ * Handles mouse up event for finalizing drawing or ending object dragging.
+ * @param {MouseEvent} event - The mouse event.
+ */
+function onCanvasMouseUp(event) {
+    if (isDrawing) {
+        const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane'));
+        if (intersects.length > 0) {
+            const endPoint = intersects[0].point;
+            window.endDrawing(endPoint);
+        } else {
+            window.cancelDrawing();
+        }
+    } else if (isDraggingObject) {
+        isDraggingObject = false;
+        renderer.domElement.style.cursor = 'auto';
+        document.getElementById('model-status').textContent = "Object moved.";
+    }
+}
+
+
+/**
+ * Selects a 3D object and updates the UI.
+ * @param {THREE.Object3D} object - The object to select (can be Mesh or Group).
+ */
+window.selectObject = function(object) {
+    if (selectedObject === object) return; // Already selected
+
+    window.deselectObject(); // Deselect previous object
+
+    selectedObject = object;
+
+    // Add a visual highlight (e.g., outline or change material color temporarily)
+    // For simplicity, let's add a wireframe helper
+    selectionOutline = new THREE.BoxHelper(selectedObject, SELECTION_COLOR);
+    scene.add(selectionOutline);
+
+    updateSelectedObjectPropertiesUI(); // Update UI after selection
+};
+
+/**
+ * Deselects the current 3D object and clears the UI.
+ */
+window.deselectObject = function() {
+    if (selectedObject) {
+        // Remove highlight
+        if (selectionOutline) {
+            scene.remove(selectionOutline);
+            selectionOutline = null;
+        }
+        selectedObject = null;
+    }
+    updateSelectedObjectPropertiesUI(); // Clear UI after deselection
+};
+
+/**
+ * Deletes the currently selected object from the scene.
+ */
+window.deleteSelectedObject = function() {
+    if (selectedObject) {
+        window.showConfirmModal("Are you sure you want to delete the selected object?", () => {
+            scene.remove(selectedObject);
+            // Dispose of geometry and material if it's a mesh
+            if (selectedObject instanceof THREE.Mesh) {
+                if (selectedObject.geometry) selectedObject.geometry.dispose();
+                if (selectedObject.material) {
+                    if (Array.isArray(selectedObject.material)) {
+                        selectedObject.material.forEach(m => m.dispose());
+                    } else {
+                        selectedObject.material.dispose();
+                    }
+                }
+            } else if (selectedObject instanceof THREE.Group) {
+                // If it's a group (like window), dispose children's resources
+                selectedObject.traverse(child => {
+                    if (child instanceof THREE.Mesh) {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) {
+                            if (Array.isArray(child.material)) {
+                                child.material.forEach(m => m.dispose());
+                            } else {
+                                child.material.dispose();
+                            }
+                        }
+                    }
+                });
+            }
+            window.deselectObject(); // Clear selection after deletion
+            console.log("Object deleted.");
+        });
+    } else {
+        document.getElementById('project-message').textContent = "No object selected to delete.";
+    }
+};
+
+/**
+ * Initiates the drawing mode for walls or floors.
+ * @param {string} type - 'wall' or 'floor'.
+ */
+window.startDrawing = function(type) {
+    isDrawing = true;
+    drawingType = type;
+    document.getElementById('model-status').textContent = `Drawing ${type}: Click on the ground plane to set start point.`;
+    window.deselectObject(); // Deselect any object when starting to draw
+    window.clearMeasurements(); // Clear measurements if active
+};
+
+/**
+ * Updates the temporary drawing line as the user drags.
+ * @param {THREE.Vector3} currentPoint - The current intersection point on the ground.
+ */
+window.updateDrawing = function(currentPoint) {
+    if (!isDrawing || !drawingStartPoint) return;
+
+    // Remove previous drawing line
+    if (currentDrawingLine) {
+        scene.remove(currentDrawingLine);
+        currentDrawingLine.geometry.dispose();
+        currentDrawingLine.material.dispose();
+    }
+
+    const points = [];
+    points.push(drawingStartPoint.clone());
+    points.push(new THREE.Vector3(currentPoint.x, drawingStartPoint.y, drawingStartPoint.z));
+    points.push(currentPoint.clone());
+    points.push(new THREE.Vector3(drawingStartPoint.x, drawingStartPoint.y, currentPoint.z)); // This is for 2D rectangle on XZ plane
+
+    // For a rectangle, we need 5 points to close the loop (start, x-end, end, z-end, start)
+    const p1 = drawingStartPoint;
+    const p2 = new THREE.Vector3(currentPoint.x, p1.y, p1.z);
+    const p3 = currentPoint;
+    const p4 = new THREE.Vector3(p1.x, p1.y, currentPoint.z);
+
+    const rectPoints = [p1, p2, p3, p4, p1]; // Close the rectangle
+
+    const geometry = new THREE.BufferGeometry().setFromPoints(rectPoints);
+    const material = new THREE.LineDashedMaterial({
+        color: DRAWING_LINE_COLOR,
+        dashSize: DRAWING_LINE_DASH_SIZE,
+        gapSize: DRAWING_LINE_GAP_SIZE
+    });
+    currentDrawingLine = new THREE.Line(geometry, material);
+    currentDrawingLine.computeLineDistances(); // Required for dashed lines
+    scene.add(currentDrawingLine);
+
+    // Update dimensions in UI
+    const width = Math.abs(currentPoint.x - drawingStartPoint.x);
+    const depth = Math.abs(currentPoint.z - drawingStartPoint.z);
+    dimWidthInput.value = width.toFixed(2);
+    dimDepthInput.value = depth.toFixed(2);
+    // Height is fixed for walls/floors during drawing, but can be adjusted after
+    if (drawingType === 'wall') {
+        dimHeightInput.value = 3; // Default wall height
+    } else if (drawingType === 'floor') {
+        dimHeightInput.value = 0.1; // Default floor thickness
+    }
+};
+
+/**
+ * Finalizes the drawing and creates the component.
+ * @param {THREE.Vector3} endPoint - The end point of the drawing.
+ */
+window.endDrawing = function(endPoint) {
+    if (!isDrawing) return;
+
+    // Remove temporary drawing line
+    if (currentDrawingLine) {
+        scene.remove(currentDrawingLine);
+        currentDrawingLine.geometry.dispose();
+        currentDrawingLine.material.dispose();
+        currentDrawingLine = null;
+    }
+
+    const startX = drawingStartPoint.x;
+    const startZ = drawingStartPoint.z;
+    const endX = endPoint.x;
+    const endZ = endPoint.z;
+
+    const width = Math.abs(endX - startX);
+    const depth = Math.abs(endZ - startZ);
+    const centerX = (startX + endX) / 2;
+    const centerZ = (startZ + endZ) / 2;
+
+    const height = parseFloat(dimHeightInput.value); // Get height from input
+
+    if (width === 0 || depth === 0 || height === 0) {
+        document.getElementById('project-message').textContent = "Dimensions cannot be zero. Drawing canceled.";
+        window.cancelDrawing();
+        return;
+    }
+
+    let newObject;
+    if (drawingType === 'wall') {
+        newObject = createWallMesh(width, height, depth);
+        newObject.position.set(centerX, height / 2, centerZ);
+    } else if (drawingType === 'floor') {
+        newObject = createFloorMesh(width, height, depth);
+        newObject.position.set(centerX, height / 2, centerZ);
+    }
+    // For windows and roofs, we'll keep the direct add functions, as drawing them is more complex
+
+    if (newObject) {
+        scene.add(newObject);
+        window.selectObject(newObject);
+        document.getElementById('model-status').textContent = `${drawingType.charAt(0).toUpperCase() + drawingType.slice(1)} created.`;
+    }
+
+    isDrawing = false;
+    drawingType = '';
+    drawingStartPoint = new THREE.Vector3(); // Reset start point
+};
+
+/**
+ * Cancels the current drawing operation.
+ */
+window.cancelDrawing = function() {
+    isDrawing = false;
+    drawingType = '';
+    drawingStartPoint = new THREE.Vector3();
+    if (currentDrawingLine) {
+        scene.remove(currentDrawingLine);
+        currentDrawingLine.geometry.dispose();
+        currentDrawingLine.material.dispose();
+        currentDrawingLine = null;
+    }
+    document.getElementById('model-status').textContent = "Drawing canceled.";
+};
+
+
+// Helper functions for creating meshes with user data
+function createWallMesh(width, height, depth) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
+    const wall = new THREE.Mesh(geometry, material);
+    wall.userData.isCustomComponent = true;
+    wall.userData.componentType = 'wall';
+    wall.userData.width = width;
+    wall.userData.height = height;
+    wall.userData.depth = depth;
+    return wall;
+}
+
+function createFloorMesh(width, height, depth) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
+    const floor = new THREE.Mesh(geometry, material);
+    floor.userData.isCustomComponent = true;
+    floor.userData.componentType = 'floor';
+    floor.userData.width = width;
+    floor.userData.height = height;
+    floor.userData.depth = depth;
+    return floor;
+}
+
+/**
+ * Adds a wall component to the scene using input dimensions.
+ */
+window.addWall = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Wall.";
+        return;
+    }
+    const wall = createWallMesh(width, height, depth);
+    wall.position.set(0, height / 2, 0); // Position on top of the ground plane
+    scene.add(wall);
+    window.selectObject(wall);
+    document.getElementById('project-message').textContent = "Wall added. Select it to move/rotate/scale.";
+};
+
+/**
+ * Adds a floor component to the scene using input dimensions.
+ */
+window.addFloor = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value); // Floor thickness
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Floor.";
+        return;
+    }
+    const floor = createFloorMesh(width, height, depth);
+    floor.position.set(0, height / 2, 0); // Position on top of the ground plane
+    scene.add(floor);
+    window.selectObject(floor);
+    document.getElementById('project-message').textContent = "Floor added. Select it to move/rotate/scale.";
+};
+
+/**
+ * Adds a generic cube component to the scene using input dimensions.
+ */
+window.addCube = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Cube.";
+        return;
+    }
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
+    const cube = new THREE.Mesh(geometry, material);
+
+    cube.position.set(0, height / 2, 0); // Position on top of the ground plane
+    cube.userData.isCustomComponent = true;
+    cube.userData.componentType = 'cube';
+    cube.userData.width = width;
+    cube.userData.height = height;
+    cube.userData.depth = depth;
+    scene.add(cube);
+    window.selectObject(cube);
+    document.getElementById('project-message').textContent = "Cube added. Select it to move/rotate/scale.";
+};
+
+/**
+ * Adds a window component to the scene using input dimensions.
+ */
+window.addWindow = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value); // Overall depth of the window, including frame
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Window.";
+        return;
+    }
+    const frameThickness = 0.1;
+    const glassThickness = 0.01;
+
+    const windowGroup = new THREE.Group();
+    windowGroup.userData.isCustomComponent = true; // Tag the group as the component
+    windowGroup.userData.componentType = 'window';
+    windowGroup.userData.width = width;
+    windowGroup.userData.height = height;
+    windowGroup.userData.depth = depth;
+
+    // Glass pane
+    const glassGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, glassThickness);
+    const glassMaterial = new THREE.MeshStandardMaterial({
+        color: 0xADD8E6, // Light blue for glass
+        transparent: true,
+        opacity: 0.5,
+        roughness: 0.1,
+        metalness: 0.1
+    });
+    const glassMesh = new THREE.Mesh(glassGeometry, glassMaterial);
+    glassMesh.position.z = 0; // Center glass within the frame depth
+    windowGroup.add(glassMesh);
+
+    // Frame parts (4 pieces)
+    const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); // Brown for wood frame
+    // Top frame
+    const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+    topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
+    windowGroup.add(topFrame);
+    // Bottom frame
+    const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+    bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
+    windowGroup.add(bottomFrame);
+    // Left frame
+    const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+    leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
+    windowGroup.add(leftFrame);
+    // Right frame
+    const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+    rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
+    windowGroup.add(rightFrame);
+
+    windowGroup.position.set(0, height / 2, 0); // Position on top of the ground plane
+    scene.add(windowGroup);
+    window.selectObject(windowGroup);
+    document.getElementById('project-message').textContent = "Window added. Select it to move/rotate/scale.";
+};
+
+/**
+ * Adds a roof component to the scene using input dimensions.
+ * For simplicity, this will be a flat roof for now.
+ */
+window.addRoof = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value); // Thickness of the roof
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Roof.";
+        return;
+    }
+
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = new THREE.MeshStandardMaterial({ color: 0x654321 }); // Brown color for roof
+    const roof = new THREE.Mesh(geometry, material);
+
+    // Position the roof on top of a typical wall height (e.g., 3 units) + half its own height
+    roof.position.set(0, 3 + (height / 2), 0);
+    roof.userData.isCustomComponent = true;
+    roof.userData.componentType = 'roof';
+    roof.userData.width = width;
+    roof.userData.height = height;
+    roof.userData.depth = depth;
+    scene.add(roof);
+    window.selectObject(roof);
+    document.getElementById('project-message').textContent = "Roof added. Select it to move/rotate/scale.";
+};
+
+
+/**
+ * Applies the selected color from the color picker to the currently selected object.
+ */
+window.applyColorToSelected = function() {
+    if (selectedObject) {
+        const newColor = colorPickerElement.value;
+        // If it's a window, apply color to the glass material
+        if (selectedObject.userData.componentType === 'window' && selectedObject.children.length > 0) {
+            // Find the glass mesh within the window group (assuming it's the first child)
+            const glassMesh = selectedObject.children.find(child => child.material && child.material.transparent);
+            if (glassMesh && glassMesh.material) {
+                glassMesh.material.color.set(newColor);
+                selectedObject.userData.material = { color: glassMesh.material.color.getHex() };
+            }
+        } else {
+            // For other objects, apply to their main material
+            selectedObject.material.color.set(newColor);
+            selectedObject.userData.material = { color: selectedObject.material.color.getHex() };
+        }
+        document.getElementById('project-message').textContent = `Color applied to ${selectedObject.userData.componentType || 'object'}.`;
+    } else {
+        document.getElementById('project-message').textContent = "No object selected to apply color.";
+    }
+};
 
 
 /**
@@ -855,6 +1567,24 @@ function onCanvasClick(event) {
  */
 window.animate = function() {
     requestAnimationFrame(window.animate);
+
+    // Apply object movement if an object is selected and not in walk mode
+    if (selectedObject && !isWalkMode && !isDrawing) { // Ensure not drawing
+        if (objectMoveForward) selectedObject.position.z -= OBJECT_MOVE_SPEED;
+        if (objectMoveBackward) selectedObject.position.z += OBJECT_MOVE_SPEED;
+        if (objectMoveLeft) selectedObject.position.x -= OBJECT_MOVE_SPEED;
+        if (objectMoveRight) selectedObject.position.x += OBJECT_MOVE_SPEED;
+        if (objectMoveUp) selectedObject.position.y += OBJECT_MOVE_SPEED;
+        if (objectMoveDown) selectedObject.position.y -= OBJECT_MOVE_SPEED;
+
+        // Apply object rotation
+        if (objectRotateLeft) selectedObject.rotation.y += OBJECT_ROTATION_SPEED;
+        if (objectRotateRight) selectedObject.rotation.y -= OBJECT_ROTATION_SPEED;
+
+
+        // Update UI after object movement/rotation
+        updateSelectedObjectPropertiesUI();
+    }
 
     if (isWalkMode) {
         // Handle first-person movement
@@ -873,6 +1603,11 @@ window.animate = function() {
         if (camera.position.y < CAMERA_HEIGHT) {
             camera.position.y = CAMERA_HEIGHT;
         }
+    }
+
+    // Update selection outline position/rotation to match selected object
+    if (selectedObject && selectionOutline) {
+        selectionOutline.update();
     }
 
     if (renderer && scene && camera) {

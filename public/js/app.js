@@ -5,7 +5,8 @@ import { getFirestore, doc, getDoc, setDoc, collection, query, where, addDoc, ge
 // Also include Three.js core and GLTFLoader as it's a Three.js extension
 import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js";
 import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/loaders/GLTFLoader.js";
-import { CSG } from "https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"; // Import CSG library
+// CSG library will now be loaded via a script tag in index.html, not imported here.
+// import { CSG } from "https://unpkg.com/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"; // This line was removed
 
 // Global Firebase variables
 window.firebaseApp = null;
@@ -34,6 +35,12 @@ window.onload = async function() {
         window.firebaseApp = initializeApp(firebaseConfig);
         window.db = getFirestore(window.firebaseApp);
         window.auth = getAuth(window.firebaseApp);
+
+        // Add event listeners for authentication buttons
+        document.getElementById('signup-btn').addEventListener('click', window.signUp);
+        document.getElementById('signin-btn').addEventListener('click', window.signIn);
+        document.getElementById('signout-btn').addEventListener('click', window.signOutUser);
+
 
         onAuthStateChanged(window.auth, async (user) => {
             if (user) {
@@ -231,7 +238,8 @@ window.loadProjects = async function() {
 
         window.renderProjectsList(projects);
         console.log("Projects loaded:", projects);
-    } catch (error) {
+    }
+    catch (error) {
         console.error("Error loading projects:", error.message);
         document.getElementById('project-message').textContent = `Error loading projects: ${error.message}`;
     }
@@ -288,7 +296,7 @@ window.renderProjectsList = function(projects) {
  */
 window.loadSpecificProject = async function(projectId) {
     if (!window.userId || !window.db) {
-        console.warn("User not logged in or Firestore not initialized. Cannot load project.");
+        console.warn("User not logged in or Firestore not initialized.");
         return;
     }
 

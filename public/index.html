@@ -7,9 +7,17 @@
     <!-- Link to external CSS file -->
     <link rel="stylesheet" href="style.css">
     <!-- Include three-bvh-csg. This is a crucial library for advanced boolean operations. -->
-    <script src="https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"></script>
+    <!-- The script tag below was removed as it's already imported as a module in app.js -->
+    <!-- <script src="https://unpkg.com/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"></script> -->
+    <!-- Favicon link to prevent 404 error -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏠</text></svg>" />
 </head>
 <body>
+    <!-- Company Logo (Option 2) -->
+    <div style="text-align: center; margin-top: 20px; margin-bottom: 20px;">
+        <img src="https://placehold.co/150x50/cccccc/000000?text=LOGO" alt="Company Logo">
+    </div>
+
     <div id="info-box">
         <p>This is a 3D home builder tour application.</p>
         <p>Instructions: Click and drag to rotate camera. Scroll to zoom.</p>
@@ -31,12 +39,12 @@
         <div class="form-group">
             <input type="email" id="signup-email" placeholder="Email (Sign Up)">
             <input type="password" id="signup-password" placeholder="Password (Sign Up)">
-            <button class="btn btn-primary" onclick="signUp()">Sign Up</button>
+            <button class="btn btn-primary" id="signup-btn">Sign Up</button>
         </div>
         <div class="form-group">
             <input type="email" id="login-email" placeholder="Email (Login)">
             <input type="password" id="login-password" placeholder="Password (Login)">
-            <button class="btn btn-primary" onclick="signIn()">Log In</button>
+            <button class="btn btn-primary" id="signin-btn">Log In</button>
         </div>
         <p id="auth-message"></p>
     </div>
@@ -44,7 +52,7 @@
     <!-- Application Section (Hidden until logged in) -->
     <div id="app-section">
         <h3>Project Management</h3>
-        <button class="btn btn-secondary" onclick="signOutUser()">Log Out</button>
+        <button class="btn btn-secondary" id="signout-btn">Log Out</button>
         <div class="form-group">
             <input type="text" id="project-name-input" placeholder="Enter project name">
             <button class="btn btn-primary" onclick="saveProject()">Save Current Project</button>

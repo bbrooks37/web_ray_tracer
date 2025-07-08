@@ -512,6 +512,12 @@ let isDraggingObject = false; // New flag for dragging objects
 let dragOffset = new THREE.Vector3(); // Offset from object center to click point
 let dragPlane = new THREE.Plane(); // Plane for dragging (parallel to ground)
 
+// --- New: Offset Drawing Variables ---
+let isOffsetMode = false;
+let offsetReferenceObject = null; // The floor/wall being offset from
+let offsetStartPoint = new THREE.Vector3();
+let currentOffsetLine = null; // The temporary dotted line for offset
+
 
 /**
  * Sets up the Three.js scene, camera, and renderer.
@@ -592,6 +598,7 @@ window.setupScene = function() {
     document.addEventListener('keyup', onKeyUp);
     // Event listener for interaction (selection, measurement, drawing, dragging)
     renderer.domElement.addEventListener('click', onCanvasClick);
+    renderer.domElement.addEventListener('dblclick', onCanvasDblClick); // New: Double click for material edit
     renderer.domElement.addEventListener('mousemove', onCanvasMouseMove); // For drawing/dragging previews
     renderer.domElement.addEventListener('mouseup', onCanvasMouseUp); // For ending drawing/dragging
 
@@ -893,6 +900,10 @@ window.toggleWalkMode = function() {
     if (isWalkMode && isDrawing) {
         window.cancelDrawing();
     }
+    // Disable offset mode if entering walk mode
+    if (isWalkMode && isOffsetMode) {
+        window.cancelOffsetDrawing();
+    }
     // Deselect any object when changing modes
     window.deselectObject();
 };
@@ -918,6 +929,10 @@ window.toggleMeasurementMode = function() {
     // Disable drawing mode if entering measurement mode
     if (isMeasuring && isDrawing) {
         window.cancelDrawing();
+    }
+    // Disable offset mode if entering measurement mode
+    if (isMeasuring && isOffsetMode) {
+        window.cancelOffsetDrawing();
     }
     // Deselect any object when changing modes
     window.deselectObject();
@@ -1038,7 +1053,17 @@ function onCanvasClick(event) {
             document.getElementById('project-message').textContent = "Click on the ground plane to start drawing.";
             window.cancelDrawing(); // Cancel if clicked elsewhere
         }
-    } else if (isMeasuring) {
+    } else if (isOffsetMode) {
+        if (intersects.length > 0 && intersects[0].object === offsetReferenceObject) {
+            const intersectionPoint = intersects[0].point;
+            offsetStartPoint.copy(intersectionPoint);
+            document.getElementById('model-status').textContent = `Offsetting ${offsetReferenceObject.userData.componentType}: Click and drag to define inner area.`;
+        } else {
+            document.getElementById('project-message').textContent = "Click on the selected floor/wall to start offsetting.";
+            window.cancelOffsetDrawing();
+        }
+    }
+    else if (isMeasuring) {
         if (intersects.length > 0) {
             const intersectionPoint = intersects[0].point;
 
@@ -1102,6 +1127,34 @@ function onCanvasClick(event) {
 }
 
 /**
+ * Handles double-clicks on the canvas for material editing.
+ * @param {MouseEvent} event - The mouse event.
+ */
+function onCanvasDblClick(event) {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects(scene.children, true);
+
+    if (intersects.length > 0) {
+        const clickedObject = intersects[0].object;
+        let actualSelectedObject = clickedObject;
+
+        if (clickedObject.parent && clickedObject.parent.userData && clickedObject.parent.userData.isCustomComponent) {
+            actualSelectedObject = clickedObject.parent;
+        }
+
+        if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
+            window.selectObject(actualSelectedObject);
+            // Programmatically open the color picker or show a material editing modal
+            colorPickerElement.click(); // Simulate a click to open the color picker
+            document.getElementById('model-status').textContent = `Editing material for ${actualSelectedObject.userData.componentType}.`;
+        }
+    }
+}
+
+/**
  * Handles mouse move event for drawing preview or object dragging.
  * @param {MouseEvent} event - The mouse event.
  */
@@ -1117,7 +1170,14 @@ function onCanvasMouseMove(event) {
             const currentPoint = intersects[0].point;
             window.updateDrawing(currentPoint);
         }
-    } else if (isDraggingObject && selectedObject) {
+    } else if (isOffsetMode && offsetReferenceObject && offsetStartPoint.x !== undefined) {
+        const intersects = raycaster.intersectObject(offsetReferenceObject);
+        if (intersects.length > 0) {
+            const currentPoint = intersects[0].point;
+            window.updateOffsetDrawing(currentPoint);
+        }
+    }
+    else if (isDraggingObject && selectedObject) {
         const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane')); // Dragging on ground plane
         if (intersects.length > 0) {
             const newPosition = intersects[0].point.clone().sub(dragOffset);
@@ -1143,7 +1203,16 @@ function onCanvasMouseUp(event) {
         } else {
             window.cancelDrawing();
         }
-    } else if (isDraggingObject) {
+    } else if (isOffsetMode) {
+        const intersects = raycaster.intersectObject(offsetReferenceObject);
+        if (intersects.length > 0) {
+            const endPoint = intersects[0].point;
+            window.endOffsetDrawing(endPoint);
+        } else {
+            window.cancelOffsetDrawing();
+        }
+    }
+    else if (isDraggingObject) {
         isDraggingObject = false;
         renderer.domElement.style.cursor = 'auto';
         document.getElementById('model-status').textContent = "Object moved.";
@@ -1235,6 +1304,7 @@ window.startDrawing = function(type) {
     document.getElementById('model-status').textContent = `Drawing ${type}: Click on the ground plane to set start point.`;
     window.deselectObject(); // Deselect any object when starting to draw
     window.clearMeasurements(); // Clear measurements if active
+    window.cancelOffsetDrawing(); // Cancel offset mode
 };
 
 /**
@@ -1534,6 +1604,175 @@ window.addRoof = function() {
     document.getElementById('project-message').textContent = "Roof added. Select it to move/rotate/scale.";
 };
 
+/**
+ * Initiates offset drawing mode.
+ * The currently selected object must be a 'floor' or 'wall'.
+ */
+window.startOffsetMode = function() {
+    if (!selectedObject || (selectedObject.userData.componentType !== 'floor' && selectedObject.userData.componentType !== 'wall')) {
+        document.getElementById('project-message').textContent = "Please select a floor or wall to offset.";
+        return;
+    }
+    isOffsetMode = true;
+    offsetReferenceObject = selectedObject;
+    document.getElementById('model-status').textContent = `Offsetting ${offsetReferenceObject.userData.componentType}: Click and drag on the object to define inner area.`;
+    window.cancelDrawing(); // Cancel drawing mode
+    window.clearMeasurements(); // Clear measurements
+};
+
+/**
+ * Updates the temporary offset drawing line as the user drags.
+ * @param {THREE.Vector3} currentPoint - The current intersection point on the object.
+ */
+window.updateOffsetDrawing = function(currentPoint) {
+    if (!isOffsetMode || !offsetReferenceObject || !offsetStartPoint) return;
+
+    // Remove previous offset line
+    if (currentOffsetLine) {
+        scene.remove(currentOffsetLine);
+        currentOffsetLine.geometry.dispose();
+        currentOffsetLine.material.dispose();
+    }
+
+    // Convert world points to local coordinates of the reference object
+    const localStart = offsetReferenceObject.worldToLocal(offsetStartPoint.clone());
+    const localCurrent = offsetReferenceObject.worldToLocal(currentPoint.clone());
+
+    // Calculate the corners of the rectangle in local coordinates
+    const minX = Math.min(localStart.x, localCurrent.x);
+    const maxX = Math.max(localStart.x, localCurrent.x);
+    const minZ = Math.min(localStart.z, localCurrent.z);
+    const maxZ = Math.max(localStart.z, localCurrent.z);
+
+    // Ensure the offset rectangle stays within the bounds of the reference object
+    const refWidth = offsetReferenceObject.userData.width;
+    const refDepth = offsetReferenceObject.userData.depth;
+
+    const halfRefWidth = refWidth / 2;
+    const halfRefDepth = refDepth / 2;
+
+    const clampedMinX = Math.max(minX, -halfRefWidth);
+    const clampedMaxX = Math.min(maxX, halfRefWidth);
+    const clampedMinZ = Math.max(minZ, -halfRefDepth);
+    const clampedMaxZ = Math.min(maxZ, halfRefDepth);
+
+    // Reconstruct points from clamped local coordinates
+    const p1 = new THREE.Vector3(clampedMinX, localStart.y, clampedMinZ);
+    const p2 = new THREE.Vector3(clampedMaxX, localStart.y, clampedMinZ);
+    const p3 = new THREE.Vector3(clampedMaxX, localStart.y, clampedMaxZ);
+    const p4 = new THREE.Vector3(clampedMinX, localStart.y, clampedMaxZ);
+
+    const rectPoints = [p1, p2, p3, p4, p1]; // Close the rectangle in local space
+
+    const geometry = new THREE.BufferGeometry().setFromPoints(rectPoints);
+    const material = new THREE.LineDashedMaterial({
+        color: DRAWING_LINE_COLOR,
+        dashSize: DRAWING_LINE_DASH_SIZE,
+        gapSize: DRAWING_LINE_GAP_SIZE
+    });
+    currentOffsetLine = new THREE.Line(geometry, material);
+    currentOffsetLine.computeLineDistances(); // Required for dashed lines
+    offsetReferenceObject.add(currentOffsetLine); // Add line as child of reference object
+};
+
+/**
+ * Finalizes the offset drawing and creates a new component (e.g., a rug).
+ * @param {THREE.Vector3} endPoint - The end intersection point on the object.
+ */
+window.endOffsetDrawing = function(endPoint) {
+    if (!isOffsetMode || !offsetReferenceObject) return;
+
+    if (currentOffsetLine) {
+        offsetReferenceObject.remove(currentOffsetLine);
+        currentOffsetLine.geometry.dispose();
+        currentOffsetLine.material.dispose();
+        currentOffsetLine = null;
+    }
+
+    const localStart = offsetReferenceObject.worldToLocal(offsetStartPoint.clone());
+    const localEnd = offsetReferenceObject.worldToLocal(endPoint.clone());
+
+    const minX = Math.min(localStart.x, localEnd.x);
+    const maxX = Math.max(localStart.x, localEnd.x);
+    const minZ = Math.min(localStart.z, localEnd.z);
+    const maxZ = Math.max(localStart.z, localEnd.z);
+
+    const width = Math.abs(maxX - minX);
+    const depth = Math.abs(maxZ - minZ);
+
+    if (width === 0 || depth === 0) {
+        document.getElementById('project-message').textContent = "Offset area is too small. Offset canceled.";
+        window.cancelOffsetDrawing();
+        return;
+    }
+
+    const centerX = (minX + maxX) / 2;
+    const centerZ = (minZ + maxZ) / 2;
+
+    let newOffsetObject;
+
+    if (offsetReferenceObject.userData.componentType === 'floor') {
+        const rugThickness = 0.05; // A thin rug
+        newOffsetObject = createOffsetFloorMesh(width, rugThickness, depth);
+        // Position relative to the center of the offset area, slightly above the floor
+        newOffsetObject.position.set(
+            offsetReferenceObject.position.x + centerX,
+            offsetReferenceObject.position.y + (offsetReferenceObject.userData.height / 2) + (rugThickness / 2) + 0.01, // Slightly above the floor
+            offsetReferenceObject.position.z + centerZ
+        );
+        newOffsetObject.userData.offsetOf = offsetReferenceObject.uuid; // Link to parent
+        document.getElementById('model-status').textContent = "Rug (offset floor) created.";
+    } else if (offsetReferenceObject.userData.componentType === 'wall') {
+        // For walls, an offset could mean a thinner inner wall or a decorative panel
+        const panelThickness = 0.05;
+        newOffsetObject = createWallMesh(width, offsetReferenceObject.userData.height, panelThickness); // Use wall height
+        newOffsetObject.position.set(
+            offsetReferenceObject.position.x + centerX,
+            offsetReferenceObject.position.y, // Same height as wall
+            offsetReferenceObject.position.z + centerZ + (offsetReferenceObject.userData.depth / 2) - (panelThickness / 2) - 0.01 // Offset slightly inside
+        );
+        newOffsetObject.userData.offsetOf = offsetReferenceObject.uuid;
+        document.getElementById('model-status').textContent = "Wall panel (offset wall) created.";
+    }
+
+
+    if (newOffsetObject) {
+        scene.add(newOffsetObject);
+        window.selectObject(newOffsetObject);
+    }
+
+    window.cancelOffsetDrawing();
+};
+
+/**
+ * Cancels the current offset drawing operation.
+ */
+window.cancelOffsetDrawing = function() {
+    isOffsetMode = false;
+    offsetReferenceObject = null;
+    offsetStartPoint = new THREE.Vector3();
+    if (currentOffsetLine) {
+        scene.remove(currentOffsetLine);
+        currentOffsetLine.geometry.dispose();
+        currentOffsetLine.material.dispose();
+        currentOffsetLine = null;
+    }
+    document.getElementById('model-status').textContent = "Offset drawing canceled.";
+};
+
+// Helper function for creating offset floor meshes (e.g., rugs)
+function createOffsetFloorMesh(width, height, depth) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = new THREE.MeshStandardMaterial({ color: 0x8B0000 }); // Red for a rug
+    const rug = new THREE.Mesh(geometry, material);
+    rug.userData.isCustomComponent = true;
+    rug.userData.componentType = 'rug'; // New component type
+    rug.userData.width = width;
+    rug.userData.height = height;
+    rug.userData.depth = depth;
+    return rug;
+}
+
 
 /**
  * Applies the selected color from the color picker to the currently selected object.
@@ -1568,8 +1807,8 @@ window.applyColorToSelected = function() {
 window.animate = function() {
     requestAnimationFrame(window.animate);
 
-    // Apply object movement if an object is selected and not in walk mode
-    if (selectedObject && !isWalkMode && !isDrawing) { // Ensure not drawing
+    // Apply object movement if an object is selected and not in walk mode or drawing/offsetting
+    if (selectedObject && !isWalkMode && !isDrawing && !isOffsetMode) {
         if (objectMoveForward) selectedObject.position.z -= OBJECT_MOVE_SPEED;
         if (objectMoveBackward) selectedObject.position.z += OBJECT_MOVE_SPEED;
         if (objectMoveLeft) selectedObject.position.x -= OBJECT_MOVE_SPEED;

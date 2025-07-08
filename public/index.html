@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D House Design App</title>
+    <title>3D Home Builder Tour</title>
     <!-- Link to external CSS file -->
     <link rel="stylesheet" href="style.css">
+    <!-- Include three-bvh-csg. This is a crucial library for advanced boolean operations. -->
+    <script src="https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"></script>
 </head>
 <body>
     <div id="info-box">
-        <p>This is a 3D house design app.</p>
+        <p>This is a 3D home builder tour application.</p>
         <p>Instructions: Click and drag to rotate camera. Scroll to zoom.</p>
         <p>Current Status: <span id="model-status">Ready to build!</span></p>
         <p id="user-id-display">User ID: Not logged in</p>
@@ -53,7 +55,7 @@
             <!-- Projects will be loaded here -->
         </ul>
 
-        <h4>Tools</h4>
+        <h4>Tools & Modes</h4>
         <div class="form-group">
             <button class="btn btn-secondary" id="toggle-walk-mode-btn" onclick="toggleWalkMode()">Toggle Walk Mode</button>
             <button class="btn btn-secondary" id="measure-distance-btn" onclick="toggleMeasurementMode()">Measure Distance</button>
@@ -71,8 +73,33 @@
             <button class="btn btn-primary" onclick="startDrawing('floor')">Draw Floor</button>
             <button class="btn btn-primary" onclick="addCube()">Add Cube</button>
             <button class="btn btn-primary" onclick="addWindow()">Add Window</button>
+            <button class="btn btn-primary" onclick="addDoor()">Add Door</button> <!-- New Door Button -->
             <button class="btn btn-primary" onclick="addRoof()">Add Roof</button>
+            <button class="btn btn-secondary" onclick="startOffsetMode()">Create Offset (Rug/Panel)</button>
             <button class="btn btn-secondary" onclick="deleteSelectedObject()">Delete Selected</button>
+        </div>
+
+        <h4>Furniture & Props</h4>
+        <div class="form-group">
+            <button class="btn btn-primary" onclick="addTable()">Add Table</button>
+            <button class="btn btn-primary" onclick="addChair()">Add Chair</button>
+            <button class="btn btn-primary" onclick="addCouch()">Add Couch</button>
+        </div>
+
+        <h4>Material & Textures</h4>
+        <div class="form-group">
+            <label for="texture-select">Select Texture:</label>
+            <select id="texture-select">
+                <option value="none">None (Color Only)</option>
+                <option value="wood">Wood</option>
+                <option value="tile">Tile</option>
+                <option value="brick">Brick</option>
+                <option value="grass">Grass</option>
+            </select>
+            <button class="btn btn-secondary" onclick="applyTextureToSelected()">Apply Texture</button>
+            <label for="color-picker">Color:</label>
+            <input type="color" id="color-picker" value="#9f7aea">
+            <button class="btn btn-secondary btn-small" onclick="applyColorToSelected()">Apply Color</button>
         </div>
 
         <h4>Selected Object Properties</h4>
@@ -81,11 +108,20 @@
             <p>Position: <span id="prop-position">N/A</span></p>
             <p>Rotation: <span id="prop-rotation">N/A</span></p>
             <p>Scale: <span id="prop-scale">N/A</span></p>
-            <div class="form-group">
-                <label for="color-picker">Color:</label>
-                <input type="color" id="color-picker" value="#9f7aea">
-                <button class="btn btn-secondary btn-small" onclick="applyColorToSelected()">Apply Color</button>
-            </div>
+        </div>
+
+        <h4>Virtual Tour Management</h4>
+        <div class="form-group">
+            <button class="btn btn-primary" onclick="addTourPoint()">Add Current Camera View as Tour Point</button>
+            <button class="btn btn-secondary" onclick="clearTourPoints()">Clear Tour Points</button>
+            <button class="btn btn-primary" onclick="startTour()">Start Tour</button>
+            <button class="btn btn-secondary" onclick="stopTour()">Stop Tour</button>
+        </div>
+        <div id="tour-points-list">
+            <h5>Tour Points:</h5>
+            <ul id="tour-points-ul">
+                <!-- Tour points will be listed here -->
+            </ul>
         </div>
 
         <h4>Controls (Orbit Mode)</h4>
@@ -99,6 +135,7 @@
                 <li>Shift + Arrow Left/Right: Rotate Y-axis</li>
             </ul>
             <p>Walk Mode: WASD (Move), Mouse (Look)</p>
+            <p>Double-click on object to quickly open color picker.</p>
         </div>
     </div>
 

@@ -3,9 +3,9 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebas
 import { getAuth, signInAnonymously, signInWithCustomToken, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, collection, query, where, addDoc, getDocs, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 // Also include Three.js core and GLTFLoader as it's a Three.js extension
-import "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
-import "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js";
-
+import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js";
+import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/loaders/GLTFLoader.js";
+import { CSG } from "https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"; // Import CSG library
 
 // Global Firebase variables
 window.firebaseApp = null;
@@ -127,6 +127,7 @@ window.signOutUser = async function() {
 
 /**
  * Saves the current 3D scene state to Firestore.
+ * This function serializes the components and their properties, including CSG operations.
  */
 window.saveProject = async function() {
     if (!window.userId || !window.db) {
@@ -141,15 +142,15 @@ window.saveProject = async function() {
         return;
     }
 
-    // Serialize current scene components
     const components = [];
     scene.traverse(object => {
         if (object.userData && object.userData.isCustomComponent) {
             let materialColor = null;
+            let materialTexture = null;
 
             // Determine the correct color to save
-            if (object.userData.componentType === 'window') {
-                // For window groups, the color is stored in userData.material
+            if (object.userData.componentType === 'window' || object.userData.componentType === 'door') {
+                // For window/door groups, the color is stored in userData.material
                 materialColor = object.userData.material ? object.userData.material.color : null;
             } else if (object.material) {
                 // For other meshes, check if original material exists (if X-Ray was active)
@@ -157,10 +158,13 @@ window.saveProject = async function() {
                 if (currentMaterial && currentMaterial.color) {
                     materialColor = currentMaterial.color.getHex();
                 }
+                if (currentMaterial && currentMaterial.map && currentMaterial.map.userData && currentMaterial.map.userData.textureName) {
+                    materialTexture = currentMaterial.map.userData.textureName;
+                }
             }
 
-            components.push({
-                id: object.uuid, // Use Three.js UUID for unique identification
+            const componentData = {
+                id: object.uuid,
                 type: object.userData.componentType,
                 geometry: {
                     width: object.userData.width,
@@ -170,19 +174,32 @@ window.saveProject = async function() {
                 position: { x: object.position.x, y: object.position.y, z: object.position.z },
                 rotation: { x: object.rotation.x, y: object.rotation.y, z: object.rotation.z },
                 scale: { x: object.scale.x, y: object.scale.y, z: object.scale.z },
-                material: { color: materialColor } // Store material color
-            });
+                material: {
+                    color: materialColor,
+                    texture: materialTexture
+                },
+                // Store CSG operations if this object is a result of one
+                csgOperations: object.userData.csgOperations || []
+            };
+            components.push(componentData);
         }
     });
+
+    // Save tour points
+    const savedTourPoints = tourPoints.map(p => ({
+        position: { x: p.position.x, y: p.position.y, z: p.position.z },
+        target: { x: p.target.x, y: p.target.y, z: p.target.z }
+    }));
 
     try {
         const projectsCollectionRef = collection(window.db, `artifacts/${appId}/users/${window.userId}/projects`);
         await addDoc(projectsCollectionRef, {
             projectName: projectName,
             sceneData: JSON.stringify(components),
+            tourData: JSON.stringify(savedTourPoints), // Save tour points
             createdAt: serverTimestamp(),
             lastModifiedAt: serverTimestamp(),
-            isXRayMode: isXRayMode // Save the X-Ray mode state
+            isXRayMode: isXRayMode
         });
         document.getElementById('project-message').textContent = `Project "${projectName}" saved successfully!`;
         console.log("Project saved:", projectName);
@@ -266,6 +283,7 @@ window.renderProjectsList = function(projects) {
 
 /**
  * Loads a specific project by its ID and applies its state to the 3D scene.
+ * This function reconstructs the scene, including CSG operations and textures.
  * @param {string} projectId - The ID of the project to load.
  */
 window.loadSpecificProject = async function(projectId) {
@@ -280,100 +298,155 @@ window.loadSpecificProject = async function(projectId) {
 
         if (projectDocSnap.exists()) {
             const projectData = projectDocSnap.data();
-            const components = JSON.parse(projectData.sceneData); // Parse the stored JSON string (now only components)
-            const savedIsXRayMode = projectData.isXRayMode || false; // Get saved X-Ray mode state
+            const components = JSON.parse(projectData.sceneData);
+            const savedTourPoints = projectData.tourData ? JSON.parse(projectData.tourData) : [];
+            const savedIsXRayMode = projectData.isXRayMode || false;
 
-            // Clear existing custom components from the scene
-            window.clearCustomComponents();
+            window.clearCustomComponents(); // Clear current scene
+            tourPoints = []; // Clear current tour points
 
             // Reconstruct the scene from saved components
             if (components && components.length > 0) {
+                // First, create all base meshes (walls, floors, cubes, roofs, furniture)
+                const baseMeshes = new Map(); // Map to store meshes by their original UUID
+
                 components.forEach(compData => {
-                    let geometry;
-                    let material;
                     let mesh;
-
-                    // Recreate material color
                     const loadedColor = compData.material && compData.material.color !== undefined ? compData.material.color : DEFAULT_MATERIAL_COLOR;
+                    const loadedTextureName = compData.material ? compData.material.texture : null;
+                    const material = createMaterial(loadedColor, loadedTextureName);
 
-                    // Recreate geometry based on type and dimensions
-                    if (compData.type === 'wall' || compData.type === 'floor' || compData.type === 'cube' || compData.type === 'roof') {
-                        geometry = new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth);
-                        material = new THREE.MeshStandardMaterial({ color: loadedColor });
+                    if (compData.type === 'wall' || compData.type === 'floor' || compData.type === 'cube' || compData.type === 'roof' || compData.type === 'rug' || compData.type === 'table' || compData.type === 'chair' || compData.type === 'couch' || compData.type === 'wallPanel') {
+                        const geometry = new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth);
                         mesh = new THREE.Mesh(geometry, material);
-                    } else if (compData.type === 'window') {
-                        const width = compData.geometry.width;
-                        const height = compData.geometry.height;
-                        const depth = compData.geometry.depth;
-                        const frameThickness = 0.1;
-                        const glassThickness = 0.01;
-
-                        const windowGroup = new THREE.Group();
-                        windowGroup.userData.isCustomComponent = true;
-                        windowGroup.userData.componentType = compData.type;
-                        windowGroup.userData.width = width;
-                        windowGroup.userData.height = height;
-                        windowGroup.userData.depth = depth;
-
-                        // Glass pane
-                        const glassGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, glassThickness);
-                        const glassMaterial = new THREE.MeshStandardMaterial({
-                            color: loadedColor, // Use loaded color for glass
-                            transparent: true,
-                            opacity: 0.5,
-                            roughness: 0.1,
-                            metalness: 0.1
-                        });
-                        const glassMesh = new THREE.Mesh(glassGeometry, glassMaterial);
-                        glassMesh.position.z = 0;
-                        windowGroup.add(glassMesh);
-
-                        // Frame parts (4 pieces)
-                        const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); // Brown for wood frame
-                        const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
-                        topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
-                        windowGroup.add(topFrame);
-                        const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
-                        bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
-                        windowGroup.add(bottomFrame);
-                        const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
-                        leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
-                        windowGroup.add(leftFrame);
-                        const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
-                        rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
-                        windowGroup.add(rightFrame);
-
-                        mesh = windowGroup;
-                        mesh.userData.material = { color: loadedColor }; // Store the color on the group's userData
+                        mesh.userData.isCustomComponent = true;
+                        mesh.userData.componentType = compData.type;
+                        mesh.userData.width = compData.geometry.width;
+                        mesh.userData.height = compData.geometry.height;
+                        mesh.userData.depth = compData.geometry.depth;
+                        mesh.userData.material = { color: loadedColor, texture: loadedTextureName };
+                        mesh.position.set(compData.position.x, compData.position.y, compData.position.z);
+                        mesh.rotation.set(compData.rotation.x, compData.rotation.y, compData.rotation.z);
+                        mesh.scale.set(compData.scale.x, compData.scale.y, compData.scale.z);
+                        mesh.uuid = compData.id; // Crucial: Restore original UUID for CSG target matching
+                        baseMeshes.set(compData.id, mesh); // Store base mesh by its ID
+                    } else if (compData.type === 'window' || compData.type === 'door') {
+                        // Windows and doors will be created later as visual components after cuts are applied
+                        // We need to store their data to apply CSG operations
+                        baseMeshes.set(compData.id, compData); // Store raw data for cutters
                     }
-                    else {
-                        console.warn(`Unknown component type: ${compData.type}`);
-                        return; // Skip unknown types
+                });
+
+                // Now, apply CSG operations for walls, windows, and doors
+                // Iterate through components to identify walls and apply cuts
+                components.forEach(compData => {
+                    if (compData.type === 'wall') {
+                        let wallMesh = baseMeshes.get(compData.id);
+                        if (!wallMesh) return;
+
+                        // Re-apply CSG cuts based on stored operations
+                        if (compData.csgOperations && compData.csgOperations.length > 0) {
+                            // Collect all cutter objects for this wall
+                            const cuttersForThisWall = [];
+                            compData.csgOperations.forEach(op => {
+                                const cutterData = baseMeshes.get(op.cutterId);
+                                if (cutterData && (cutterData.type === 'window' || cutterData.type === 'door')) {
+                                    cuttersForThisWall.push({
+                                        type: cutterData.type,
+                                        geometry: cutterData.geometry,
+                                        position: cutterData.position,
+                                        rotation: cutterData.rotation,
+                                        scale: cutterData.scale
+                                    });
+                                }
+                            });
+
+                            // Perform CSG subtractions sequentially
+                            let currentWallMesh = wallMesh;
+                            cuttersForThisWall.forEach(cutter => {
+                                const cutterGeometry = new THREE.BoxGeometry(cutter.geometry.width, cutter.geometry.height, cutter.geometry.depth);
+                                const cutterMesh = new THREE.Mesh(cutterGeometry);
+                                cutterMesh.position.set(cutter.position.x, cutter.position.y, cutter.position.z);
+                                cutterMesh.rotation.set(cutter.rotation.x, cutter.rotation.y, cutter.rotation.z);
+                                cutterMesh.scale.set(cutter.scale.x, cutter.scale.y, cutter.scale.z);
+
+                                const csg = new CSG();
+                                csg.subtract(currentWallMesh, cutterMesh);
+                                const newResultMesh = csg.toMesh();
+
+                                // Transfer original properties to the new mesh
+                                newResultMesh.material = currentWallMesh.material;
+                                newResultMesh.userData = { ...currentWallMesh.userData };
+                                newResultMesh.position.copy(currentWallMesh.position);
+                                newResultMesh.rotation.copy(currentWallMesh.rotation);
+                                newResultMesh.scale.copy(currentWallMesh.scale);
+                                newResultMesh.uuid = currentWallMesh.uuid; // Keep original UUID
+
+                                // Dispose of the old mesh's geometry and material
+                                if (currentWallMesh.geometry) currentWallMesh.geometry.dispose();
+                                if (currentWallMesh.material) {
+                                    if (Array.isArray(currentWallMesh.material)) {
+                                        currentWallMesh.material.forEach(m => m.dispose());
+                                    } else {
+                                        currentWallMesh.material.dispose();
+                                    }
+                                }
+                                currentWallMesh = newResultMesh; // Update reference for next cut
+                            });
+                            wallMesh = currentWallMesh; // Final cut wall
+                        }
+                        scene.add(wallMesh); // Add the final wall mesh (with cuts) to the scene
                     }
+                });
 
-                    // Apply transformations
-                    mesh.position.set(compData.position.x, compData.position.y, compData.position.z);
-                    mesh.rotation.set(compData.rotation.x, compData.rotation.y, compData.rotation.z);
-                    mesh.scale.set(compData.scale.x, compData.scale.y, compData.scale.z);
-
-                    scene.add(mesh);
+                // Add visual components for windows and doors after all walls are processed
+                components.forEach(compData => {
+                    if (compData.type === 'window') {
+                        const windowGroup = createWindowMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, compData.material.color);
+                        windowGroup.position.set(compData.position.x, compData.position.y, compData.position.z);
+                        windowGroup.rotation.set(compData.rotation.x, compData.rotation.y, compData.rotation.z);
+                        windowGroup.scale.set(compData.scale.x, compData.scale.y, compData.scale.z);
+                        windowGroup.uuid = compData.id; // Restore UUID
+                        windowGroup.userData.csgOperations = compData.csgOperations; // Restore CSG operations
+                        scene.add(windowGroup);
+                    } else if (compData.type === 'door') {
+                        const doorGroup = createDoorMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, compData.material.color);
+                        doorGroup.position.set(compData.position.x, compData.position.y, compData.position.z);
+                        doorGroup.rotation.set(compData.rotation.x, compData.rotation.y, compData.rotation.z);
+                        doorGroup.scale.set(compData.scale.x, compData.scale.y, compData.scale.z);
+                        doorGroup.uuid = compData.id; // Restore UUID
+                        doorGroup.userData.csgOperations = compData.csgOperations; // Restore CSG operations
+                        scene.add(doorGroup);
+                    } else if (compData.type !== 'wall') { // Add other non-wall, non-cutter components
+                        const mesh = baseMeshes.get(compData.id);
+                        if (mesh) {
+                            scene.add(mesh);
+                        }
+                    }
                 });
             }
 
+            // Load tour points
+            savedTourPoints.forEach(p => {
+                tourPoints.push({
+                    position: new THREE.Vector3(p.position.x, p.position.y, p.position.z),
+                    target: new THREE.Vector3(p.target.x, p.target.y, p.target.z)
+                });
+            });
+            renderTourPointsList(); // Update UI list
+
             // Apply X-Ray mode if it was saved as active
-            if (savedIsXRayMode && !isXRayMode) { // Only toggle if current mode is different
+            if (savedIsXRayMode && !isXRayMode) {
                 window.toggleXRayMode();
-            } else if (!savedIsXRayMode && isXRayMode) { // If it was off but currently on, turn off
+            } else if (!savedIsXRayMode && isXRayMode) {
                 window.toggleXRayMode();
             }
-
 
             document.getElementById('model-status').textContent = `Loaded: ${projectData.projectName}`;
             window.loadingOverlay.style.display = 'none';
             document.getElementById('project-message').textContent = `Project "${projectData.projectName}" loaded successfully!`;
             console.log("Project loaded:", projectData.projectName);
 
-            // Clear any selection after loading a new project
             window.deselectObject();
         } else {
             document.getElementById('project-message').textContent = "Project not found.";
@@ -433,7 +506,7 @@ let scene, camera, renderer;
 let cameraTarget = new THREE.Vector3(0, 0, 0); // The point the camera orbits around
 
 // Camera controls
-let isDraggingCamera = false; // Renamed from isDragging to avoid conflict with object dragging
+let isDraggingCamera = false;
 let previousMouseX = 0;
 let previousMouseY = 0;
 let rotationSpeed = 0.005;
@@ -443,36 +516,35 @@ let zoomSpeed = 0.1;
 const modelStatusElement = document.getElementById('model-status');
 const loadingOverlay = document.getElementById('loading-overlay');
 
-// --- Phase 3: Measurement & Navigation Variables ---
+// --- Measurement & Navigation Variables ---
 let isWalkMode = false;
 let isMeasuring = false;
-let selectedMeasurementPoints = []; // Stores THREE.Vector3 points
-let measurementSpheres = []; // Stores the visual spheres for measurement points
+let selectedMeasurementPoints = [];
+let measurementSpheres = [];
 const MEASUREMENT_SPHERE_RADIUS = 0.2;
-const MEASUREMENT_LINE_COLOR = 0x00ff00; // Green
+const MEASUREMENT_LINE_COLOR = 0x00ff00;
 
 // First-person movement variables
 let moveForward = false;
 let moveBackward = false;
 let moveLeft = false;
 let moveRight = false;
-let cameraSpeed = 0.5; // Speed of camera movement in walk mode
-const CAMERA_HEIGHT = 1.6; // Approximate human eye height for walk mode
+let cameraSpeed = 0.5;
+const CAMERA_HEIGHT = 1.6;
 
 // Raycaster for interaction
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
-// --- Phase 4: Building Tools & Selection Variables ---
-let selectedObject = null; // Currently selected THREE.Mesh object
-let selectionOutline = null; // Helper for visual selection
-const SELECTION_COLOR = 0xffff00; // Yellow for selection highlight
-const DEFAULT_MATERIAL_COLOR = 0x888888; // Default color for new objects
-let isXRayMode = false; // New variable for X-Ray mode
+// --- Building Tools & Selection Variables ---
+let selectedObject = null;
+let selectionOutline = null;
+const SELECTION_COLOR = 0xffff00;
+const DEFAULT_MATERIAL_COLOR = 0x888888;
+let isXRayMode = false;
 
 // Store original materials for X-Ray toggle
 const originalMaterials = new Map();
-
 
 // UI elements for selected object properties
 let propTypeElement;
@@ -480,56 +552,71 @@ let propPositionElement;
 let propRotationElement;
 let propScaleElement;
 let colorPickerElement;
+let textureSelectElement; // New: Texture select dropdown
 
 // Input elements for dimensions
 let dimWidthInput;
 let dimHeightInput;
 let dimDepthInput;
 
-
-// --- Phase 5: Enhanced Navigation, Building, and Visuals Variables ---
+// --- Enhanced Navigation, Building, and Visuals Variables ---
 let objectMoveForward = false;
 let objectMoveBackward = false;
 let objectMoveLeft = false;
 let objectMoveRight = false;
 let objectMoveUp = false;
 let objectMoveDown = false;
-const OBJECT_MOVE_SPEED = 0.5; // Speed for moving selected objects
+const OBJECT_MOVE_SPEED = 0.5;
 let objectRotateLeft = false;
 let objectRotateRight = false;
-const OBJECT_ROTATION_SPEED = Math.PI / 32; // Rotation speed in radians (e.g., 5.625 degrees per step)
+const OBJECT_ROTATION_SPEED = Math.PI / 32;
 
-// --- Phase 7: Drawing Mode Variables ---
+// --- Drawing Mode Variables ---
 let isDrawing = false;
-let drawingType = ''; // 'wall' or 'floor'
+let drawingType = '';
 let drawingStartPoint = new THREE.Vector3();
-let currentDrawingLine = null; // The temporary dotted line
-const DRAWING_LINE_COLOR = 0x00ffff; // Cyan for drawing preview
+let currentDrawingLine = null;
+const DRAWING_LINE_COLOR = 0x00ffff;
 const DRAWING_LINE_DASH_SIZE = 0.5;
 const DRAWING_LINE_GAP_SIZE = 0.2;
 
-let isDraggingObject = false; // New flag for dragging objects
-let dragOffset = new THREE.Vector3(); // Offset from object center to click point
-let dragPlane = new THREE.Plane(); // Plane for dragging (parallel to ground)
+let isDraggingObject = false;
+let dragOffset = new THREE.Vector3();
+let dragPlane = new THREE.Plane();
 
-// --- New: Offset Drawing Variables ---
+// --- Offset Drawing Variables ---
 let isOffsetMode = false;
-let offsetReferenceObject = null; // The floor/wall being offset from
+let offsetReferenceObject = null;
 let offsetStartPoint = new THREE.Vector3();
-let currentOffsetLine = null; // The temporary dotted line for offset
+let currentOffsetLine = null;
+
+// --- Texture Loader ---
+const textureLoader = new THREE.TextureLoader();
+const textures = {
+    wood: null,
+    tile: null,
+    brick: null,
+    grass: null
+};
+
+// --- Tour Management Variables ---
+let tourPoints = []; // Stores { position: THREE.Vector3, target: THREE.Vector3 }
+let currentTourPointIndex = 0;
+let isTourActive = false;
+let tourAnimationId = null;
+const TOUR_SPEED = 0.005; // Speed of camera movement during tour
+const TOUR_TRANSITION_DURATION = 3000; // Milliseconds for transition between points
 
 
 /**
  * Sets up the Three.js scene, camera, and renderer.
- * This function is now called AFTER Firebase authentication is ready.
  */
 window.setupScene = function() {
-    // Only setup scene once
-    if (scene) return;
+    if (scene) return; // Only setup scene once
 
     // Scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a202c); // Dark background matching body
+    scene.background = new THREE.Color(0x1a202c);
 
     // Add Skybox for a more natural environment
     const cubeTextureLoader = new THREE.CubeTextureLoader();
@@ -543,10 +630,9 @@ window.setupScene = function() {
     ]);
     scene.background = skyboxTexture;
 
-
     // Camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 10, 20); // Initial camera position for an empty scene
+    camera.position.set(0, 10, 20);
     camera.lookAt(0, 0, 0);
 
     // Renderer
@@ -555,73 +641,95 @@ window.setupScene = function() {
     document.body.appendChild(renderer.domElement);
 
     // Lighting
-    const ambientLight = new THREE.AmbientLight(0x404040); // Soft white light
+    const ambientLight = new THREE.AmbientLight(0x404040);
     scene.add(ambientLight);
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(1, 1, 1).normalize();
     scene.add(directionalLight);
-
-    // Add a second directional light for better overall illumination
     const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
     directionalLight2.position.set(-1, -1, -1).normalize();
     scene.add(directionalLight2);
 
-
     // Ground Plane
     const planeGeometry = new THREE.PlaneGeometry(100, 100);
     const planeMaterial = new THREE.MeshStandardMaterial({
-        color: 0x334155, // A darker, muted blue-grey
+        color: 0x334155,
         roughness: 0.7,
         metalness: 0.1,
         side: THREE.DoubleSide
     });
     const plane = new THREE.Mesh(planeGeometry, planeMaterial);
-    plane.rotation.x = Math.PI / 2; // Rotate to be horizontal
-    plane.position.y = -0.01; // Slightly below 0
-    plane.name = 'groundPlane'; // Give it a name for raycasting
+    plane.rotation.x = Math.PI / 2;
+    plane.position.y = -0.01;
+    plane.name = 'groundPlane';
     scene.add(plane);
 
     // Add AxesHelper
-    const axesHelper = new THREE.AxesHelper(10); // Size of the axes
+    const axesHelper = new THREE.AxesHelper(10);
     scene.add(axesHelper);
 
-
-    // Event Listeners for camera controls
+    // Event Listeners
     renderer.domElement.addEventListener('mousedown', onMouseDown);
     renderer.domElement.addEventListener('mouseup', onMouseUp);
     renderer.domElement.addEventListener('mousemove', onMouseMove);
     renderer.domElement.addEventListener('wheel', onMouseWheel);
     window.addEventListener('resize', onWindowResize);
-
-    // Event Listeners for Walk Mode (Keyboard) and Object Movement
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
-    // Event listener for interaction (selection, measurement, drawing, dragging)
     renderer.domElement.addEventListener('click', onCanvasClick);
-    renderer.domElement.addEventListener('dblclick', onCanvasDblClick); // New: Double click for material edit
-    renderer.domElement.addEventListener('mousemove', onCanvasMouseMove); // For drawing/dragging previews
-    renderer.domElement.addEventListener('mouseup', onCanvasMouseUp); // For ending drawing/dragging
+    renderer.domElement.addEventListener('dblclick', onCanvasDblClick);
+    renderer.domElement.addEventListener('mousemove', onCanvasMouseMove);
+    renderer.domElement.addEventListener('mouseup', onCanvasMouseUp);
 
-
-    // Get UI elements for measurement
+    // Get UI elements
     window.measurementDistanceElement = document.getElementById('measurement-distance');
     window.measurementMidpointElement = document.getElementById('measurement-midpoint');
-
-    // Get UI elements for selected object properties
     propTypeElement = document.getElementById('prop-type');
     propPositionElement = document.getElementById('prop-position');
     propRotationElement = document.getElementById('prop-rotation');
     propScaleElement = document.getElementById('prop-scale');
     colorPickerElement = document.getElementById('color-picker');
-
-    // Get input elements for dimensions
+    textureSelectElement = document.getElementById('texture-select'); // Get texture select
     dimWidthInput = document.getElementById('dim-width');
     dimHeightInput = document.getElementById('dim-height');
     dimDepthInput = document.getElementById('dim-depth');
+
+    // Load textures
+    loadTextures();
 };
 
 /**
+ * Loads predefined textures for application to objects.
+ */
+function loadTextures() {
+    const texturePaths = {
+        wood: 'https://threejs.org/examples/textures/hardwood2_diffuse.jpg',
+        tile: 'https://threejs.org/examples/textures/tiles.jpg',
+        brick: 'https://threejs.org/examples/textures/brick_diffuse.jpg',
+        grass: 'https://threejs.org/examples/textures/grasslight-big.jpg'
+    };
+
+    for (const key in texturePaths) {
+        textureLoader.load(texturePaths[key],
+            (texture) => {
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                texture.repeat.set(4, 4); // Adjust repetition as needed
+                texture.userData = { textureName: key }; // Store name for saving
+                textures[key] = texture;
+                console.log(`Texture "${key}" loaded.`);
+            },
+            undefined,
+            (err) => {
+                console.error(`Error loading texture "${key}":`, err);
+            }
+        );
+    }
+}
+
+/**
  * Clears all custom components from the scene.
+ * This function handles disposing of geometries and materials to prevent memory leaks.
  */
 window.clearCustomComponents = function() {
     const componentsToRemove = [];
@@ -633,18 +741,34 @@ window.clearCustomComponents = function() {
 
     componentsToRemove.forEach(object => {
         scene.remove(object);
-        if (object.geometry) object.geometry.dispose();
-        if (object.material) {
-            if (Array.isArray(object.material)) {
-                object.material.forEach(m => m.dispose());
-            } else {
-                object.material.dispose();
+        if (object instanceof THREE.Mesh) {
+            if (object.geometry) object.geometry.dispose();
+            if (object.material) {
+                if (Array.isArray(object.material)) {
+                    object.material.forEach(m => m.dispose());
+                } else {
+                    object.material.dispose();
+                }
             }
+        } else if (object instanceof THREE.Group) {
+            object.traverse(child => {
+                if (child instanceof THREE.Mesh) {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(m => m.dispose());
+                        } else {
+                            child.material.dispose();
+                        }
+                    }
+                }
+            });
         }
     });
-    window.deselectObject(); // Deselect any active selection
+    window.deselectObject();
+    originalMaterials.clear(); // Clear stored original materials
+    if (isXRayMode) window.toggleXRayMode(); // Reset X-Ray mode if active
 };
-
 
 /**
  * Handles window resize events to update camera aspect ratio and renderer size.
@@ -660,37 +784,31 @@ function onWindowResize() {
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseDown(event) {
-    if (isWalkMode) return; // No orbit dragging in walk mode
+    if (isWalkMode || isDrawing || isOffsetMode || isTourActive) return;
 
-    // Check if we're clicking on a selectable object to start dragging
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
-    const intersects = raycaster.intersectObjects(scene.children, true); // Intersect with all children
+    const intersects = raycaster.intersectObjects(scene.children, true);
 
     if (intersects.length > 0) {
         const clickedObject = intersects[0].object;
         let actualSelectedObject = clickedObject;
 
-        // If the clicked object is part of a group (like a window), select the group
         if (clickedObject.parent && clickedObject.parent.userData && clickedObject.parent.userData.isCustomComponent) {
             actualSelectedObject = clickedObject.parent;
         }
 
         if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
-            window.selectObject(actualSelectedObject); // Select the object
+            window.selectObject(actualSelectedObject);
             isDraggingObject = true;
-            // Calculate offset from object center to click point
             dragOffset.subVectors(intersects[0].point, actualSelectedObject.position);
-            // Set up a plane for consistent dragging
-            dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(dragPlane.normal).negate(), intersects[0].point);
             renderer.domElement.style.cursor = 'grabbing';
-            return; // Don't start camera drag if object drag is initiated
+            return;
         }
     }
 
-    // If no object drag, start camera drag
     isDraggingCamera = true;
     previousMouseX = event.clientX;
     previousMouseY = event.clientY;
@@ -708,35 +826,27 @@ function onMouseUp() {
 }
 
 /**
- * Handles mouse move event for camera rotation (Orbit Mode) or object dragging.
+ * Handles mouse move event for camera rotation (Orbit Mode) or look (Walk Mode).
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseMove(event) {
     if (isWalkMode) {
-        // First-person look controls
         const movementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
         const movementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
 
-        // Rotate camera's yaw (around Y-axis)
         camera.rotation.y -= movementX * rotationSpeed;
-
-        // Rotate camera's pitch (around local X-axis)
         camera.rotation.x -= movementY * rotationSpeed;
-        camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x)); // Clamp pitch
+        camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
     } else if (isDraggingCamera) {
-        // Orbit controls
         const deltaX = event.clientX - previousMouseX;
         const deltaY = event.clientY - previousMouseY;
 
-        // Rotate around the cameraTarget
         const cameraVector = new THREE.Vector3().subVectors(camera.position, cameraTarget);
 
-        // Rotate horizontally (around Y-axis)
         const horizontalAngle = -deltaX * rotationSpeed;
         const horizontalQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), horizontalAngle);
         cameraVector.applyQuaternion(horizontalQuaternion);
 
-        // Rotate vertically (around camera's local X-axis)
         const verticalAngle = -deltaY * rotationSpeed;
         const currentUp = camera.up.clone();
         const cameraRight = new THREE.Vector3().crossVectors(currentUp, cameraVector).normalize();
@@ -756,13 +866,12 @@ function onMouseMove(event) {
  * @param {WheelEvent} event - The mouse wheel event.
  */
 function onMouseWheel(event) {
-    if (!isWalkMode) { // Only zoom if not in walk mode
-        event.preventDefault(); // Prevent page scrolling
+    if (!isWalkMode) {
+        event.preventDefault();
         const zoomAmount = event.deltaY * zoomSpeed;
         camera.position.addScaledVector(camera.position.clone().normalize(), zoomAmount);
-        // Ensure camera doesn't go too close or too far
-        const minDistance = 5; // Example minimum distance
-        const maxDistance = 200; // Example maximum distance
+        const minDistance = 5;
+        const maxDistance = 200;
         const currentDistance = camera.position.distanceTo(cameraTarget);
         if (currentDistance < minDistance) {
             camera.position.copy(cameraTarget).add(camera.position.clone().sub(cameraTarget).normalize().multiplyScalar(minDistance));
@@ -784,20 +893,20 @@ function onKeyDown(event) {
             case 'KeyA': moveLeft = true; break;
             case 'KeyD': moveRight = true; break;
         }
-    } else if (selectedObject) { // Object movement when an object is selected and not in walk mode
+    } else if (selectedObject) {
         switch (event.code) {
             case 'ArrowUp': objectMoveForward = true; break;
             case 'ArrowDown': objectMoveBackward = true; break;
             case 'ArrowLeft':
-                if (event.shiftKey) { objectRotateLeft = true; } // Shift + Left Arrow for rotation
-                else { objectMoveLeft = true; } // Left Arrow for movement
+                if (event.shiftKey) { objectRotateLeft = true; }
+                else { objectMoveLeft = true; }
                 break;
             case 'ArrowRight':
-                if (event.shiftKey) { objectRotateRight = true; } // Shift + Right Arrow for rotation
-                else { objectMoveRight = true; } // Right Arrow for movement
+                if (event.shiftKey) { objectRotateRight = true; }
+                else { objectMoveRight = true; }
                 break;
-            case 'BracketRight': objectMoveUp = true; break; // ']' key
-            case 'BracketLeft': objectMoveDown = true; break; // '[' key
+            case 'BracketRight': objectMoveUp = true; break;
+            case 'BracketLeft': objectMoveDown = true; break;
         }
     }
 }
@@ -833,25 +942,37 @@ function updateSelectedObjectPropertiesUI() {
     if (selectedObject) {
         propTypeElement.textContent = selectedObject.userData.componentType || 'Unknown';
         propPositionElement.textContent = `X: ${selectedObject.position.x.toFixed(2)}, Y: ${selectedObject.position.y.toFixed(2)}, Z: ${selectedObject.position.z.toFixed(2)}`;
-        // Display rotation in degrees for user-friendliness
         propRotationElement.textContent = `X: ${(selectedObject.rotation.x * 180 / Math.PI).toFixed(1)}°, Y: ${(selectedObject.rotation.y * 180 / Math.PI).toFixed(1)}°, Z: ${(selectedObject.rotation.z * 180 / Math.PI).toFixed(1)}°`;
         propScaleElement.textContent = `X: ${selectedObject.scale.x.toFixed(2)}, Y: ${selectedObject.scale.y.toFixed(2)}, Z: ${selectedObject.scale.z.toFixed(2)}`;
-        // Ensure color picker reflects the current color
-        if (selectedObject.material && selectedObject.material.color) {
-            colorPickerElement.value = `#${selectedObject.material.color.getHexString()}`;
-        } else if (selectedObject.userData.material && selectedObject.userData.material.color !== undefined) {
-            // For groups like windows, use the stored color
-            colorPickerElement.value = `#${new THREE.Color(selectedObject.userData.material.color).getHexString()}`;
+
+        let currentColor = DEFAULT_MATERIAL_COLOR;
+        let currentTextureName = 'none';
+
+        if (selectedObject.userData.componentType === 'window' || selectedObject.userData.componentType === 'door') {
+            if (selectedObject.userData.material && selectedObject.userData.material.color !== undefined) {
+                currentColor = selectedObject.userData.material.color;
+            }
+        } else if (selectedObject.material) {
+            const material = originalMaterials.has(selectedObject.uuid) ? originalMaterials.get(selectedObject.uuid) : selectedObject.material;
+            if (material && material.color) {
+                currentColor = material.color.getHex();
+            }
+            if (material && material.map && material.map.userData && material.map.userData.textureName) {
+                currentTextureName = material.map.userData.textureName;
+            }
         }
+        colorPickerElement.value = `#${new THREE.Color(currentColor).getHexString()}`;
+        textureSelectElement.value = currentTextureName;
+
     } else {
         propTypeElement.textContent = 'N/A';
         propPositionElement.textContent = 'N/A';
         propRotationElement.textContent = 'N/A';
         propScaleElement.textContent = 'N/A';
-        colorPickerElement.value = '#9f7aea'; // Reset to default color
+        colorPickerElement.value = '#9f7aea';
+        textureSelectElement.value = 'none';
     }
 }
-
 
 /**
  * Toggles between orbit mode and first-person walk mode.
@@ -861,7 +982,6 @@ window.toggleWalkMode = function() {
     const toggleBtn = document.getElementById('toggle-walk-mode-btn');
     if (isWalkMode) {
         toggleBtn.textContent = "Exit Walk Mode";
-        // Attempt to request pointer lock
         renderer.domElement.requestPointerLock = renderer.domElement.requestPointerLock ||
                                                  renderer.domElement.mozRequestPointerLock ||
                                                  renderer.domElement.webkitRequestPointerLock;
@@ -869,42 +989,30 @@ window.toggleWalkMode = function() {
             renderer.domElement.requestPointerLock();
         }
 
-        // Set camera to a "human eye" height and look horizontally
         camera.position.y = CAMERA_HEIGHT;
-        camera.rotation.x = 0; // Reset pitch
-        camera.lookAt(camera.position.x, CAMERA_HEIGHT, camera.position.z - 1); // Look forward
+        camera.rotation.x = 0;
+        camera.lookAt(camera.position.x, CAMERA_HEIGHT, camera.position.z - 1);
     } else {
         toggleBtn.textContent = "Toggle Walk Mode";
-        // Exit pointer lock
         document.exitPointerLock = document.exitPointerLock ||
                                    document.mozExitPointerLock ||
                                    document.webkitExitPointerLock;
         if (document.exitPointerLock) {
             document.exitPointerLock();
         }
-        // Reset camera to orbit view (re-center on a reasonable point if no model)
-        if (selectedObject) { // If an object is selected, orbit around it
+        if (selectedObject) {
             cameraTarget.copy(selectedObject.position);
             camera.position.set(selectedObject.position.x + 10, selectedObject.position.y + 10, selectedObject.position.z + 20);
-        } else { // Default orbit position
+        } else {
             cameraTarget.set(0,0,0);
             camera.position.set(0, 10, 20);
         }
         camera.lookAt(cameraTarget);
     }
-    // Disable measurement mode if entering walk mode
-    if (isWalkMode && isMeasuring) {
-        window.toggleMeasurementMode();
-    }
-    // Disable drawing mode if entering walk mode
-    if (isWalkMode && isDrawing) {
-        window.cancelDrawing();
-    }
-    // Disable offset mode if entering walk mode
-    if (isWalkMode && isOffsetMode) {
-        window.cancelOffsetDrawing();
-    }
-    // Deselect any object when changing modes
+    if (isMeasuring) window.toggleMeasurementMode();
+    if (isDrawing) window.cancelDrawing();
+    if (isOffsetMode) window.cancelOffsetDrawing();
+    if (isTourActive) window.stopTour(); // Stop tour if mode changes
     window.deselectObject();
 };
 
@@ -916,25 +1024,15 @@ window.toggleMeasurementMode = function() {
     const measureBtn = document.getElementById('measure-distance-btn');
     if (isMeasuring) {
         measureBtn.textContent = "Exit Measurement";
-        // Clear any existing measurements when entering mode
         window.clearMeasurements();
     } else {
         measureBtn.textContent = "Measure Distance";
-        window.clearMeasurements(); // Clear measurements when exiting
+        window.clearMeasurements();
     }
-    // Disable walk mode if entering measurement mode
-    if (isMeasuring && isWalkMode) {
-        window.toggleWalkMode();
-    }
-    // Disable drawing mode if entering measurement mode
-    if (isMeasuring && isDrawing) {
-        window.cancelDrawing();
-    }
-    // Disable offset mode if entering measurement mode
-    if (isMeasuring && isOffsetMode) {
-        window.cancelOffsetDrawing();
-    }
-    // Deselect any object when changing modes
+    if (isWalkMode) window.toggleWalkMode();
+    if (isDrawing) window.cancelDrawing();
+    if (isOffsetMode) window.cancelOffsetDrawing();
+    if (isTourActive) window.stopTour(); // Stop tour if mode changes
     window.deselectObject();
 };
 
@@ -947,45 +1045,14 @@ window.toggleXRayMode = function() {
 
     scene.traverse(object => {
         if (object.userData && object.userData.isCustomComponent) {
-            // Handle groups (like windows)
             if (object instanceof THREE.Group) {
                 object.traverse(child => {
                     if (child instanceof THREE.Mesh && child.material) {
-                        if (isXRayMode) {
-                            if (!originalMaterials.has(child.uuid)) {
-                                originalMaterials.set(child.uuid, child.material);
-                            }
-                            child.material = new THREE.MeshBasicMaterial({
-                                color: child.material.color,
-                                transparent: true,
-                                opacity: 0.2,
-                                wireframe: true
-                            });
-                        } else {
-                            if (originalMaterials.has(child.uuid)) {
-                                child.material = originalMaterials.get(child.uuid);
-                                originalMaterials.delete(child.uuid);
-                            }
-                        }
+                        applyXRayMaterial(child, isXRayMode);
                     }
                 });
-            } else if (object instanceof THREE.Mesh && object.material) { // Handle single meshes
-                if (isXRayMode) {
-                    if (!originalMaterials.has(object.uuid)) {
-                        originalMaterials.set(object.uuid, object.material);
-                    }
-                    object.material = new THREE.MeshBasicMaterial({
-                        color: object.material.color,
-                        transparent: true,
-                        opacity: 0.2,
-                        wireframe: true
-                    });
-                } else {
-                    if (originalMaterials.has(object.uuid)) {
-                        object.material = originalMaterials.get(object.uuid);
-                        originalMaterials.delete(object.uuid);
-                    }
-                }
+            } else if (object instanceof THREE.Mesh && object.material) {
+                applyXRayMaterial(object, isXRayMode);
             }
         }
     });
@@ -994,6 +1061,29 @@ window.toggleXRayMode = function() {
     document.getElementById('model-status').textContent = isXRayMode ? "X-Ray View ON" : "X-Ray View OFF";
 };
 
+/**
+ * Applies or removes X-Ray material to a given mesh.
+ * @param {THREE.Mesh} mesh - The mesh to modify.
+ * @param {boolean} apply - True to apply X-Ray, false to remove.
+ */
+function applyXRayMaterial(mesh, apply) {
+    if (apply) {
+        if (!originalMaterials.has(mesh.uuid)) {
+            originalMaterials.set(mesh.uuid, mesh.material);
+        }
+        mesh.material = new THREE.MeshBasicMaterial({
+            color: mesh.material.color,
+            transparent: true,
+            opacity: 0.2,
+            wireframe: true
+        });
+    } else {
+        if (originalMaterials.has(mesh.uuid)) {
+            mesh.material = originalMaterials.get(mesh.uuid);
+            originalMaterials.delete(mesh.uuid);
+        }
+    }
+}
 
 /**
  * Clears all visual measurement points and resets display.
@@ -1003,7 +1093,6 @@ window.clearMeasurements = function() {
     selectedMeasurementPoints = [];
     measurementSpheres.forEach(s => scene.remove(s));
     measurementSpheres = [];
-    // Remove any measurement lines
     const existingLine = scene.getObjectByName('measurementLine');
     if (existingLine) {
         scene.remove(existingLine);
@@ -1015,27 +1104,21 @@ window.clearMeasurements = function() {
 };
 
 /**
- * Handles clicks on the canvas for measurement or selection.
+ * Handles clicks on the canvas for measurement, selection, drawing, or offsetting.
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasClick(event) {
-    // If dragging for orbit controls or object dragging, don't trigger selection/measurement click
-    if (isDraggingCamera || isDraggingObject) return;
+    if (isDraggingCamera || isDraggingObject || isTourActive) return;
 
-    // Calculate mouse position in normalized device coordinates (-1 to +1)
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
-    // Update the raycaster with the camera and mouse position
     raycaster.setFromCamera(mouse, camera);
 
-    // Intersect only with custom components and the ground plane
     const interactableObjects = [];
     scene.traverse(object => {
         if (object.userData && object.userData.isCustomComponent) {
             interactableObjects.push(object);
         }
-        // Also include the ground plane for measurement clicks/drawing
         if (object.name === 'groundPlane') {
             interactableObjects.push(object);
         }
@@ -1046,12 +1129,11 @@ function onCanvasClick(event) {
     if (isDrawing) {
         if (intersects.length > 0) {
             const intersectionPoint = intersects[0].point;
-            // For drawing, the first click sets the start point
             drawingStartPoint.copy(intersectionPoint);
             document.getElementById('model-status').textContent = `Drawing ${drawingType}: Click and drag to define dimensions.`;
         } else {
             document.getElementById('project-message').textContent = "Click on the ground plane to start drawing.";
-            window.cancelDrawing(); // Cancel if clicked elsewhere
+            window.cancelDrawing();
         }
     } else if (isOffsetMode) {
         if (intersects.length > 0 && intersects[0].object === offsetReferenceObject) {
@@ -1059,11 +1141,10 @@ function onCanvasClick(event) {
             offsetStartPoint.copy(intersectionPoint);
             document.getElementById('model-status').textContent = `Offsetting ${offsetReferenceObject.userData.componentType}: Click and drag to define inner area.`;
         } else {
-            document.getElementById('project-message').textContent = "Click on the selected floor/wall to start offsetting.";
+            document.getElementById('project-message').textContent = "Click on the selected floor or wall to start offsetting.";
             window.cancelOffsetDrawing();
         }
-    }
-    else if (isMeasuring) {
+    } else if (isMeasuring) {
         if (intersects.length > 0) {
             const intersectionPoint = intersects[0].point;
 
@@ -1099,22 +1180,20 @@ function onCanvasClick(event) {
                 }, 3000);
             } else if (selectedMeasurementPoints.length > 2) {
                 window.clearMeasurements();
-                selectedMeasurementPoints.push(intersectionPoint); // Start new measurement with current click
+                selectedMeasurementPoints.push(intersectionPoint);
                 scene.add(sphere);
                 measurementSpheres.push(sphere);
             }
         }
-    } else { // Selection mode
+    } else {
         if (intersects.length > 0) {
             const clickedObject = intersects[0].object;
             let actualSelectedObject = clickedObject;
 
-            // If the clicked object is part of a group (like a window), select the group
             if (clickedObject.parent && clickedObject.parent.userData && clickedObject.parent.userData.isCustomComponent) {
                 actualSelectedObject = clickedObject.parent;
             }
 
-            // Ensure we only select our custom components, not the ground plane or lights
             if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
                 window.selectObject(actualSelectedObject);
             } else {
@@ -1131,6 +1210,8 @@ function onCanvasClick(event) {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasDblClick(event) {
+    if (isTourActive) return; // Disable during tour
+
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -1147,8 +1228,7 @@ function onCanvasDblClick(event) {
 
         if (actualSelectedObject.userData && actualSelectedObject.userData.isCustomComponent) {
             window.selectObject(actualSelectedObject);
-            // Programmatically open the color picker or show a material editing modal
-            colorPickerElement.click(); // Simulate a click to open the color picker
+            colorPickerElement.click();
             document.getElementById('model-status').textContent = `Editing material for ${actualSelectedObject.userData.componentType}.`;
         }
     }
@@ -1159,7 +1239,6 @@ function onCanvasDblClick(event) {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasMouseMove(event) {
-    // Update mouse coordinates
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -1176,15 +1255,12 @@ function onCanvasMouseMove(event) {
             const currentPoint = intersects[0].point;
             window.updateOffsetDrawing(currentPoint);
         }
-    }
-    else if (isDraggingObject && selectedObject) {
-        const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane')); // Dragging on ground plane
+    } else if (isDraggingObject && selectedObject) {
+        const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane'));
         if (intersects.length > 0) {
             const newPosition = intersects[0].point.clone().sub(dragOffset);
-            // Keep object at its original Y-level relative to its base
             selectedObject.position.x = newPosition.x;
             selectedObject.position.z = newPosition.z;
-            // Update UI
             updateSelectedObjectPropertiesUI();
         }
     }
@@ -1211,8 +1287,7 @@ function onCanvasMouseUp(event) {
         } else {
             window.cancelOffsetDrawing();
         }
-    }
-    else if (isDraggingObject) {
+    } else if (isDraggingObject) {
         isDraggingObject = false;
         renderer.domElement.style.cursor = 'auto';
         document.getElementById('model-status').textContent = "Object moved.";
@@ -1225,18 +1300,16 @@ function onCanvasMouseUp(event) {
  * @param {THREE.Object3D} object - The object to select (can be Mesh or Group).
  */
 window.selectObject = function(object) {
-    if (selectedObject === object) return; // Already selected
+    if (selectedObject === object) return;
 
-    window.deselectObject(); // Deselect previous object
+    window.deselectObject();
 
     selectedObject = object;
 
-    // Add a visual highlight (e.g., outline or change material color temporarily)
-    // For simplicity, let's add a wireframe helper
     selectionOutline = new THREE.BoxHelper(selectedObject, SELECTION_COLOR);
     scene.add(selectionOutline);
 
-    updateSelectedObjectPropertiesUI(); // Update UI after selection
+    updateSelectedObjectPropertiesUI();
 };
 
 /**
@@ -1244,14 +1317,13 @@ window.selectObject = function(object) {
  */
 window.deselectObject = function() {
     if (selectedObject) {
-        // Remove highlight
         if (selectionOutline) {
             scene.remove(selectionOutline);
             selectionOutline = null;
         }
         selectedObject = null;
     }
-    updateSelectedObjectPropertiesUI(); // Clear UI after deselection
+    updateSelectedObjectPropertiesUI();
 };
 
 /**
@@ -1261,7 +1333,6 @@ window.deleteSelectedObject = function() {
     if (selectedObject) {
         window.showConfirmModal("Are you sure you want to delete the selected object?", () => {
             scene.remove(selectedObject);
-            // Dispose of geometry and material if it's a mesh
             if (selectedObject instanceof THREE.Mesh) {
                 if (selectedObject.geometry) selectedObject.geometry.dispose();
                 if (selectedObject.material) {
@@ -1272,7 +1343,6 @@ window.deleteSelectedObject = function() {
                     }
                 }
             } else if (selectedObject instanceof THREE.Group) {
-                // If it's a group (like window), dispose children's resources
                 selectedObject.traverse(child => {
                     if (child instanceof THREE.Mesh) {
                         if (child.geometry) child.geometry.dispose();
@@ -1286,12 +1356,296 @@ window.deleteSelectedObject = function() {
                     }
                 });
             }
-            window.deselectObject(); // Clear selection after deletion
+            window.deselectObject();
             console.log("Object deleted.");
         });
     } else {
         document.getElementById('project-message').textContent = "No object selected to delete.";
     }
+};
+
+/**
+ * Creates a standard material with optional texture.
+ * @param {number} color - Hex color.
+ * @param {string} textureName - Name of the texture to apply ('wood', 'tile', 'brick', 'grass', 'none').
+ * @returns {THREE.MeshStandardMaterial} The created material.
+ */
+function createMaterial(color, textureName) {
+    let material;
+    if (textureName && textures[textureName]) {
+        material = new THREE.MeshStandardMaterial({
+            map: textures[textureName],
+            color: color // Apply color tint over texture
+        });
+    } else {
+        material = new THREE.MeshStandardMaterial({ color: color });
+    }
+    return material;
+}
+
+/**
+ * Adds a wall component to the scene using input dimensions.
+ * This function now creates a base wall mesh that can be cut by windows/doors.
+ */
+window.addWall = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Wall.";
+        return;
+    }
+
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none'); // Walls start with default color, no texture
+    const wall = new THREE.Mesh(geometry, material);
+
+    wall.position.set(0, height / 2, 0);
+    wall.userData.isCustomComponent = true;
+    wall.userData.componentType = 'wall';
+    wall.userData.width = width;
+    wall.userData.height = height;
+    wall.userData.depth = depth;
+    wall.userData.csgOperations = []; // To store operations that cut this wall
+
+    scene.add(wall);
+    window.selectObject(wall);
+    document.getElementById('project-message').textContent = "Wall added. Select it to move/rotate/scale. Double-click to edit material.";
+};
+
+/**
+ * Adds a floor component to the scene using input dimensions.
+ */
+window.addFloor = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Floor.";
+        return;
+    }
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none');
+    const floor = new THREE.Mesh(geometry, material);
+
+    floor.position.set(0, height / 2, 0);
+    floor.userData.isCustomComponent = true;
+    floor.userData.componentType = 'floor';
+    floor.userData.width = width;
+    floor.userData.height = height;
+    floor.userData.depth = depth;
+    scene.add(floor);
+    window.selectObject(floor);
+    document.getElementById('project-message').textContent = "Floor added. Select it to move/rotate/scale. Double-click to edit material.";
+};
+
+/**
+ * Adds a generic cube component to the scene using input dimensions.
+ */
+window.addCube = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Cube.";
+        return;
+    }
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none');
+    const cube = new THREE.Mesh(geometry, material);
+
+    cube.position.set(0, height / 2, 0);
+    cube.userData.isCustomComponent = true;
+    cube.userData.componentType = 'cube';
+    cube.userData.width = width;
+    cube.userData.height = height;
+    cube.userData.depth = depth;
+    scene.add(cube);
+    window.selectObject(cube);
+    document.getElementById('project-message').textContent = "Cube added. Select it to move/rotate/scale. Double-click to edit material.";
+};
+
+/**
+ * Adds a window component to the scene.
+ * This function now creates a window (cutter) and applies a CSG subtraction to the selected wall.
+ */
+window.addWindow = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value); // Thickness of the window frame/glass
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Window.";
+        return;
+    }
+
+    if (!selectedObject || selectedObject.userData.componentType !== 'wall') {
+        document.getElementById('project-message').textContent = "Please select a wall to add a window to.";
+        return;
+    }
+
+    const wall = selectedObject;
+    const windowColor = 0xADD8E6; // Light blue for glass
+
+    // Create the window visual group (frame and glass)
+    const windowGroup = createWindowMesh(width, height, depth, windowColor);
+    windowGroup.position.copy(wall.position); // Start at wall's position
+    windowGroup.position.y = wall.position.y; // Center vertically on wall
+    windowGroup.userData.csgOperations = [{ type: 'subtract', targetId: wall.uuid }]; // Store CSG operation data
+
+    scene.add(windowGroup);
+    window.selectObject(windowGroup);
+    document.getElementById('model-status').textContent = "Window added. Move it to cut the wall. Double-click to edit material.";
+    applyCSGCut(wall, windowGroup, 'subtract'); // Apply initial cut
+};
+
+/**
+ * Helper function to create a window mesh (group of frame and glass).
+ */
+function createWindowMesh(width, height, depth, color) {
+    const frameThickness = 0.1;
+    const glassThickness = 0.01;
+
+    const windowGroup = new THREE.Group();
+    windowGroup.userData.isCustomComponent = true;
+    windowGroup.userData.componentType = 'window';
+    windowGroup.userData.width = width;
+    windowGroup.userData.height = height;
+    windowGroup.userData.depth = depth;
+    windowGroup.userData.material = { color: color }; // Store color for saving
+
+    const glassGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, glassThickness);
+    const glassMaterial = new THREE.MeshStandardMaterial({
+        color: color,
+        transparent: true,
+        opacity: 0.5,
+        roughness: 0.1,
+        metalness: 0.1
+    });
+    const glassMesh = new THREE.Mesh(glassGeometry, glassMaterial);
+    glassMesh.position.z = 0;
+    windowGroup.add(glassMesh);
+
+    const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+    const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+    topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
+    windowGroup.add(topFrame);
+    const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
+    bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
+    windowGroup.add(bottomFrame);
+    const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+    leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
+    windowGroup.add(leftFrame);
+    const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
+    rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
+    windowGroup.add(rightFrame);
+
+    return windowGroup;
+}
+
+/**
+ * Adds a door component to the scene.
+ * This function creates a door (cutter) and applies a CSG subtraction to the selected wall.
+ */
+window.addDoor = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value);
+    const depth = parseFloat(dimDepthInput.value); // Thickness of the door
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Door.";
+        return;
+    }
+
+    if (!selectedObject || selectedObject.userData.componentType !== 'wall') {
+        document.getElementById('project-message').textContent = "Please select a wall to add a door to.";
+        return;
+    }
+
+    const wall = selectedObject;
+    const doorColor = 0x5C4033; // Brown for door
+
+    // Create the door visual group (panel and frame)
+    const doorGroup = createDoorMesh(width, height, depth, doorColor);
+    doorGroup.position.copy(wall.position); // Start at wall's position
+    doorGroup.position.y = wall.position.y - (wall.userData.height / 2) + (height / 2); // Position on ground level
+    doorGroup.userData.csgOperations = [{ type: 'subtract', targetId: wall.uuid }]; // Store CSG operation data
+
+    scene.add(doorGroup);
+    window.selectObject(doorGroup);
+    document.getElementById('model-status').textContent = "Door added. Move it to cut the wall. Double-click to edit material.";
+    applyCSGCut(wall, doorGroup, 'subtract'); // Apply initial cut
+};
+
+/**
+ * Helper function to create a door mesh (group of panel and frame).
+ */
+function createDoorMesh(width, height, depth, color) {
+    const frameThickness = 0.1;
+
+    const doorGroup = new THREE.Group();
+    doorGroup.userData.isCustomComponent = true;
+    doorGroup.userData.componentType = 'door';
+    doorGroup.userData.width = width;
+    doorGroup.userData.height = height;
+    doorGroup.userData.depth = depth;
+    doorGroup.userData.material = { color: color }; // Store color for saving
+
+    // Door panel
+    const panelGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, depth - frameThickness * 2);
+    const panelMaterial = new THREE.MeshStandardMaterial({ color: color });
+    const panelMesh = new THREE.Mesh(panelGeometry, panelMaterial);
+    panelMesh.position.z = 0;
+    panelMesh.userData.isPanel = true; // Tag for material editing
+    doorGroup.add(panelMesh);
+
+    // Door frame (4 pieces)
+    const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x3D2B1F }); // Darker brown for frame
+    // Top frame
+    const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, depth), frameMaterial);
+    topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
+    doorGroup.add(topFrame);
+    // Bottom frame (usually not visible, but for completeness)
+    const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, depth), frameMaterial);
+    bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
+    doorGroup.add(bottomFrame);
+    // Left frame
+    const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, depth), frameMaterial);
+    leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
+    doorGroup.add(leftFrame);
+    // Right frame
+    const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, depth), frameMaterial);
+    rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
+    doorGroup.add(rightFrame);
+
+    return doorGroup;
+}
+
+
+/**
+ * Adds a roof component to the scene using input dimensions.
+ * For simplicity, this will be a flat roof for now.
+ */
+window.addRoof = function() {
+    const width = parseFloat(dimWidthInput.value);
+    const height = parseFloat(dimHeightInput.value); // Thickness of the roof
+    const depth = parseFloat(dimDepthInput.value);
+    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
+        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Roof.";
+        return;
+    }
+
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const material = createMaterial(0x654321, 'none'); // Brown color for roof
+    const roof = new THREE.Mesh(geometry, material);
+
+    roof.position.set(0, 3 + (height / 2), 0);
+    roof.userData.isCustomComponent = true;
+    roof.userData.componentType = 'roof';
+    roof.userData.width = width;
+    roof.userData.height = height;
+    roof.userData.depth = depth;
+    scene.add(roof);
+    window.selectObject(roof);
+    document.getElementById('project-message').textContent = "Roof added. Select it to move/rotate/scale. Double-click to edit material.";
 };
 
 /**
@@ -1302,9 +1656,10 @@ window.startDrawing = function(type) {
     isDrawing = true;
     drawingType = type;
     document.getElementById('model-status').textContent = `Drawing ${type}: Click on the ground plane to set start point.`;
-    window.deselectObject(); // Deselect any object when starting to draw
-    window.clearMeasurements(); // Clear measurements if active
-    window.cancelOffsetDrawing(); // Cancel offset mode
+    window.deselectObject();
+    window.clearMeasurements();
+    window.cancelOffsetDrawing();
+    if (isTourActive) window.stopTour();
 };
 
 /**
@@ -1314,26 +1669,18 @@ window.startDrawing = function(type) {
 window.updateDrawing = function(currentPoint) {
     if (!isDrawing || !drawingStartPoint) return;
 
-    // Remove previous drawing line
     if (currentDrawingLine) {
         scene.remove(currentDrawingLine);
         currentDrawingLine.geometry.dispose();
         currentDrawingLine.material.dispose();
     }
 
-    const points = [];
-    points.push(drawingStartPoint.clone());
-    points.push(new THREE.Vector3(currentPoint.x, drawingStartPoint.y, drawingStartPoint.z));
-    points.push(currentPoint.clone());
-    points.push(new THREE.Vector3(drawingStartPoint.x, drawingStartPoint.y, currentPoint.z)); // This is for 2D rectangle on XZ plane
-
-    // For a rectangle, we need 5 points to close the loop (start, x-end, end, z-end, start)
     const p1 = drawingStartPoint;
     const p2 = new THREE.Vector3(currentPoint.x, p1.y, p1.z);
     const p3 = currentPoint;
     const p4 = new THREE.Vector3(p1.x, p1.y, currentPoint.z);
 
-    const rectPoints = [p1, p2, p3, p4, p1]; // Close the rectangle
+    const rectPoints = [p1, p2, p3, p4, p1];
 
     const geometry = new THREE.BufferGeometry().setFromPoints(rectPoints);
     const material = new THREE.LineDashedMaterial({
@@ -1342,19 +1689,17 @@ window.updateDrawing = function(currentPoint) {
         gapSize: DRAWING_LINE_GAP_SIZE
     });
     currentDrawingLine = new THREE.Line(geometry, material);
-    currentDrawingLine.computeLineDistances(); // Required for dashed lines
+    currentDrawingLine.computeLineDistances();
     scene.add(currentDrawingLine);
 
-    // Update dimensions in UI
     const width = Math.abs(currentPoint.x - drawingStartPoint.x);
     const depth = Math.abs(currentPoint.z - drawingStartPoint.z);
     dimWidthInput.value = width.toFixed(2);
     dimDepthInput.value = depth.toFixed(2);
-    // Height is fixed for walls/floors during drawing, but can be adjusted after
     if (drawingType === 'wall') {
-        dimHeightInput.value = 3; // Default wall height
+        dimHeightInput.value = 3;
     } else if (drawingType === 'floor') {
-        dimHeightInput.value = 0.1; // Default floor thickness
+        dimHeightInput.value = 0.1;
     }
 };
 
@@ -1365,7 +1710,6 @@ window.updateDrawing = function(currentPoint) {
 window.endDrawing = function(endPoint) {
     if (!isDrawing) return;
 
-    // Remove temporary drawing line
     if (currentDrawingLine) {
         scene.remove(currentDrawingLine);
         currentDrawingLine.geometry.dispose();
@@ -1383,7 +1727,7 @@ window.endDrawing = function(endPoint) {
     const centerX = (startX + endX) / 2;
     const centerZ = (startZ + endZ) / 2;
 
-    const height = parseFloat(dimHeightInput.value); // Get height from input
+    const height = parseFloat(dimHeightInput.value);
 
     if (width === 0 || depth === 0 || height === 0) {
         document.getElementById('project-message').textContent = "Dimensions cannot be zero. Drawing canceled.";
@@ -1399,7 +1743,6 @@ window.endDrawing = function(endPoint) {
         newObject = createFloorMesh(width, height, depth);
         newObject.position.set(centerX, height / 2, centerZ);
     }
-    // For windows and roofs, we'll keep the direct add functions, as drawing them is more complex
 
     if (newObject) {
         scene.add(newObject);
@@ -1409,7 +1752,7 @@ window.endDrawing = function(endPoint) {
 
     isDrawing = false;
     drawingType = '';
-    drawingStartPoint = new THREE.Vector3(); // Reset start point
+    drawingStartPoint = new THREE.Vector3();
 };
 
 /**
@@ -1428,182 +1771,6 @@ window.cancelDrawing = function() {
     document.getElementById('model-status').textContent = "Drawing canceled.";
 };
 
-
-// Helper functions for creating meshes with user data
-function createWallMesh(width, height, depth) {
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
-    const wall = new THREE.Mesh(geometry, material);
-    wall.userData.isCustomComponent = true;
-    wall.userData.componentType = 'wall';
-    wall.userData.width = width;
-    wall.userData.height = height;
-    wall.userData.depth = depth;
-    return wall;
-}
-
-function createFloorMesh(width, height, depth) {
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
-    const floor = new THREE.Mesh(geometry, material);
-    floor.userData.isCustomComponent = true;
-    floor.userData.componentType = 'floor';
-    floor.userData.width = width;
-    floor.userData.height = height;
-    floor.userData.depth = depth;
-    return floor;
-}
-
-/**
- * Adds a wall component to the scene using input dimensions.
- */
-window.addWall = function() {
-    const width = parseFloat(dimWidthInput.value);
-    const height = parseFloat(dimHeightInput.value);
-    const depth = parseFloat(dimDepthInput.value);
-    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
-        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Wall.";
-        return;
-    }
-    const wall = createWallMesh(width, height, depth);
-    wall.position.set(0, height / 2, 0); // Position on top of the ground plane
-    scene.add(wall);
-    window.selectObject(wall);
-    document.getElementById('project-message').textContent = "Wall added. Select it to move/rotate/scale.";
-};
-
-/**
- * Adds a floor component to the scene using input dimensions.
- */
-window.addFloor = function() {
-    const width = parseFloat(dimWidthInput.value);
-    const height = parseFloat(dimHeightInput.value); // Floor thickness
-    const depth = parseFloat(dimDepthInput.value);
-    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
-        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Floor.";
-        return;
-    }
-    const floor = createFloorMesh(width, height, depth);
-    floor.position.set(0, height / 2, 0); // Position on top of the ground plane
-    scene.add(floor);
-    window.selectObject(floor);
-    document.getElementById('project-message').textContent = "Floor added. Select it to move/rotate/scale.";
-};
-
-/**
- * Adds a generic cube component to the scene using input dimensions.
- */
-window.addCube = function() {
-    const width = parseFloat(dimWidthInput.value);
-    const height = parseFloat(dimHeightInput.value);
-    const depth = parseFloat(dimDepthInput.value);
-    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
-        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Cube.";
-        return;
-    }
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = new THREE.MeshStandardMaterial({ color: DEFAULT_MATERIAL_COLOR });
-    const cube = new THREE.Mesh(geometry, material);
-
-    cube.position.set(0, height / 2, 0); // Position on top of the ground plane
-    cube.userData.isCustomComponent = true;
-    cube.userData.componentType = 'cube';
-    cube.userData.width = width;
-    cube.userData.height = height;
-    cube.userData.depth = depth;
-    scene.add(cube);
-    window.selectObject(cube);
-    document.getElementById('project-message').textContent = "Cube added. Select it to move/rotate/scale.";
-};
-
-/**
- * Adds a window component to the scene using input dimensions.
- */
-window.addWindow = function() {
-    const width = parseFloat(dimWidthInput.value);
-    const height = parseFloat(dimHeightInput.value);
-    const depth = parseFloat(dimDepthInput.value); // Overall depth of the window, including frame
-    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
-        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Window.";
-        return;
-    }
-    const frameThickness = 0.1;
-    const glassThickness = 0.01;
-
-    const windowGroup = new THREE.Group();
-    windowGroup.userData.isCustomComponent = true; // Tag the group as the component
-    windowGroup.userData.componentType = 'window';
-    windowGroup.userData.width = width;
-    windowGroup.userData.height = height;
-    windowGroup.userData.depth = depth;
-
-    // Glass pane
-    const glassGeometry = new THREE.BoxGeometry(width - frameThickness * 2, height - frameThickness * 2, glassThickness);
-    const glassMaterial = new THREE.MeshStandardMaterial({
-        color: 0xADD8E6, // Light blue for glass
-        transparent: true,
-        opacity: 0.5,
-        roughness: 0.1,
-        metalness: 0.1
-    });
-    const glassMesh = new THREE.Mesh(glassGeometry, glassMaterial);
-    glassMesh.position.z = 0; // Center glass within the frame depth
-    windowGroup.add(glassMesh);
-
-    // Frame parts (4 pieces)
-    const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); // Brown for wood frame
-    // Top frame
-    const topFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
-    topFrame.position.set(0, (height / 2) - (frameThickness / 2), 0);
-    windowGroup.add(topFrame);
-    // Bottom frame
-    const bottomFrame = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial);
-    bottomFrame.position.set(0, -(height / 2) + (frameThickness / 2), 0);
-    windowGroup.add(bottomFrame);
-    // Left frame
-    const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
-    leftFrame.position.set(-(width / 2) + (frameThickness / 2), 0, 0);
-    windowGroup.add(leftFrame);
-    // Right frame
-    const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height - frameThickness * 2, frameThickness), frameMaterial);
-    rightFrame.position.set((width / 2) - (frameThickness / 2), 0, 0);
-    windowGroup.add(rightFrame);
-
-    windowGroup.position.set(0, height / 2, 0); // Position on top of the ground plane
-    scene.add(windowGroup);
-    window.selectObject(windowGroup);
-    document.getElementById('project-message').textContent = "Window added. Select it to move/rotate/scale.";
-};
-
-/**
- * Adds a roof component to the scene using input dimensions.
- * For simplicity, this will be a flat roof for now.
- */
-window.addRoof = function() {
-    const width = parseFloat(dimWidthInput.value);
-    const height = parseFloat(dimHeightInput.value); // Thickness of the roof
-    const depth = parseFloat(dimDepthInput.value);
-    if (isNaN(width) || isNaN(height) || isNaN(depth) || width <= 0 || height <= 0 || depth <= 0) {
-        document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Roof.";
-        return;
-    }
-
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = new THREE.MeshStandardMaterial({ color: 0x654321 }); // Brown color for roof
-    const roof = new THREE.Mesh(geometry, material);
-
-    // Position the roof on top of a typical wall height (e.g., 3 units) + half its own height
-    roof.position.set(0, 3 + (height / 2), 0);
-    roof.userData.isCustomComponent = true;
-    roof.userData.componentType = 'roof';
-    roof.userData.width = width;
-    roof.userData.height = height;
-    roof.userData.depth = depth;
-    scene.add(roof);
-    window.selectObject(roof);
-    document.getElementById('project-message').textContent = "Roof added. Select it to move/rotate/scale.";
-};
-
 /**
  * Initiates offset drawing mode.
  * The currently selected object must be a 'floor' or 'wall'.
@@ -1616,8 +1783,9 @@ window.startOffsetMode = function() {
     isOffsetMode = true;
     offsetReferenceObject = selectedObject;
     document.getElementById('model-status').textContent = `Offsetting ${offsetReferenceObject.userData.componentType}: Click and drag on the object to define inner area.`;
-    window.cancelDrawing(); // Cancel drawing mode
-    window.clearMeasurements(); // Clear measurements
+    window.cancelDrawing();
+    window.clearMeasurements();
+    if (isTourActive) window.stopTour();
 };
 
 /**
@@ -1627,24 +1795,20 @@ window.startOffsetMode = function() {
 window.updateOffsetDrawing = function(currentPoint) {
     if (!isOffsetMode || !offsetReferenceObject || !offsetStartPoint) return;
 
-    // Remove previous offset line
     if (currentOffsetLine) {
-        scene.remove(currentOffsetLine);
+        offsetReferenceObject.remove(currentOffsetLine);
         currentOffsetLine.geometry.dispose();
         currentOffsetLine.material.dispose();
     }
 
-    // Convert world points to local coordinates of the reference object
     const localStart = offsetReferenceObject.worldToLocal(offsetStartPoint.clone());
     const localCurrent = offsetReferenceObject.worldToLocal(currentPoint.clone());
 
-    // Calculate the corners of the rectangle in local coordinates
     const minX = Math.min(localStart.x, localCurrent.x);
     const maxX = Math.max(localStart.x, localCurrent.x);
     const minZ = Math.min(localStart.z, localCurrent.z);
     const maxZ = Math.max(localStart.z, localCurrent.z);
 
-    // Ensure the offset rectangle stays within the bounds of the reference object
     const refWidth = offsetReferenceObject.userData.width;
     const refDepth = offsetReferenceObject.userData.depth;
 
@@ -1656,13 +1820,12 @@ window.updateOffsetDrawing = function(currentPoint) {
     const clampedMinZ = Math.max(minZ, -halfRefDepth);
     const clampedMaxZ = Math.min(maxZ, halfRefDepth);
 
-    // Reconstruct points from clamped local coordinates
     const p1 = new THREE.Vector3(clampedMinX, localStart.y, clampedMinZ);
     const p2 = new THREE.Vector3(clampedMaxX, localStart.y, clampedMinZ);
     const p3 = new THREE.Vector3(clampedMaxX, localStart.y, clampedMaxZ);
     const p4 = new THREE.Vector3(clampedMinX, localStart.y, clampedMaxZ);
 
-    const rectPoints = [p1, p2, p3, p4, p1]; // Close the rectangle in local space
+    const rectPoints = [p1, p2, p3, p4, p1];
 
     const geometry = new THREE.BufferGeometry().setFromPoints(rectPoints);
     const material = new THREE.LineDashedMaterial({
@@ -1671,12 +1834,12 @@ window.updateOffsetDrawing = function(currentPoint) {
         gapSize: DRAWING_LINE_GAP_SIZE
     });
     currentOffsetLine = new THREE.Line(geometry, material);
-    currentOffsetLine.computeLineDistances(); // Required for dashed lines
-    offsetReferenceObject.add(currentOffsetLine); // Add line as child of reference object
+    currentOffsetLine.computeLineDistances();
+    offsetReferenceObject.add(currentOffsetLine);
 };
 
 /**
- * Finalizes the offset drawing and creates a new component (e.g., a rug).
+ * Finalizes the offset drawing and creates a new component (e.g., a rug or wall panel).
  * @param {THREE.Vector3} endPoint - The end intersection point on the object.
  */
 window.endOffsetDrawing = function(endPoint) {
@@ -1712,29 +1875,27 @@ window.endOffsetDrawing = function(endPoint) {
     let newOffsetObject;
 
     if (offsetReferenceObject.userData.componentType === 'floor') {
-        const rugThickness = 0.05; // A thin rug
+        const rugThickness = 0.05;
         newOffsetObject = createOffsetFloorMesh(width, rugThickness, depth);
-        // Position relative to the center of the offset area, slightly above the floor
         newOffsetObject.position.set(
             offsetReferenceObject.position.x + centerX,
-            offsetReferenceObject.position.y + (offsetReferenceObject.userData.height / 2) + (rugThickness / 2) + 0.01, // Slightly above the floor
+            offsetReferenceObject.position.y + (offsetReferenceObject.userData.height / 2) + (rugThickness / 2) + 0.01,
             offsetReferenceObject.position.z + centerZ
         );
-        newOffsetObject.userData.offsetOf = offsetReferenceObject.uuid; // Link to parent
+        newOffsetObject.userData.offsetOf = offsetReferenceObject.uuid;
         document.getElementById('model-status').textContent = "Rug (offset floor) created.";
     } else if (offsetReferenceObject.userData.componentType === 'wall') {
-        // For walls, an offset could mean a thinner inner wall or a decorative panel
         const panelThickness = 0.05;
-        newOffsetObject = createWallMesh(width, offsetReferenceObject.userData.height, panelThickness); // Use wall height
+        newOffsetObject = createWallMesh(width, offsetReferenceObject.userData.height, panelThickness);
         newOffsetObject.position.set(
             offsetReferenceObject.position.x + centerX,
-            offsetReferenceObject.position.y, // Same height as wall
-            offsetReferenceObject.position.z + centerZ + (offsetReferenceObject.userData.depth / 2) - (panelThickness / 2) - 0.01 // Offset slightly inside
+            offsetReferenceObject.position.y,
+            offsetReferenceObject.position.z + centerZ + (offsetReferenceObject.userData.depth / 2) - (panelThickness / 2) - 0.01
         );
         newOffsetObject.userData.offsetOf = offsetReferenceObject.uuid;
+        newOffsetObject.userData.componentType = 'wallPanel'; // Differentiate from main walls
         document.getElementById('model-status').textContent = "Wall panel (offset wall) created.";
     }
-
 
     if (newOffsetObject) {
         scene.add(newOffsetObject);
@@ -1760,18 +1921,186 @@ window.cancelOffsetDrawing = function() {
     document.getElementById('model-status').textContent = "Offset drawing canceled.";
 };
 
-// Helper function for creating offset floor meshes (e.g., rugs)
+/**
+ * Helper function for creating offset floor meshes (e.g., rugs).
+ */
 function createOffsetFloorMesh(width, height, depth) {
     const geometry = new THREE.BoxGeometry(width, height, depth);
     const material = new THREE.MeshStandardMaterial({ color: 0x8B0000 }); // Red for a rug
     const rug = new THREE.Mesh(geometry, material);
     rug.userData.isCustomComponent = true;
-    rug.userData.componentType = 'rug'; // New component type
+    rug.userData.componentType = 'rug';
     rug.userData.width = width;
     rug.userData.height = height;
     rug.userData.depth = depth;
     return rug;
 }
+
+/**
+ * Adds a simple table to the scene.
+ */
+window.addTable = function() {
+    const tableWidth = 2;
+    const tableHeight = 0.8;
+    const tableDepth = 1;
+    const legThickness = 0.1;
+
+    const tableGroup = new THREE.Group();
+    tableGroup.userData.isCustomComponent = true;
+    tableGroup.userData.componentType = 'table';
+    tableGroup.userData.width = tableWidth;
+    tableGroup.userData.height = tableHeight;
+    tableGroup.userData.depth = tableDepth;
+
+    // Tabletop
+    const tabletopGeometry = new THREE.BoxGeometry(tableWidth, legThickness, tableDepth);
+    const tabletopMaterial = createMaterial(0xA0522D, 'wood'); // Sienna wood color
+    const tabletop = new THREE.Mesh(tabletopGeometry, tabletopMaterial);
+    tabletop.position.y = tableHeight - (legThickness / 2);
+    tableGroup.add(tabletop);
+
+    // Legs
+    const legHeight = tableHeight - legThickness;
+    const legGeometry = new THREE.BoxGeometry(legThickness, legHeight, legThickness);
+    const legMaterial = createMaterial(0x8B4513, 'wood'); // SaddleBrown wood color
+
+    const halfWidth = tableWidth / 2 - legThickness / 2;
+    const halfDepth = tableDepth / 2 - legThickness / 2;
+    const legY = legHeight / 2;
+
+    const leg1 = new THREE.Mesh(legGeometry, legMaterial);
+    leg1.position.set(halfWidth, legY, halfDepth);
+    tableGroup.add(leg1);
+
+    const leg2 = new THREE.Mesh(legGeometry, legMaterial);
+    leg2.position.set(-halfWidth, legY, halfDepth);
+    tableGroup.add(leg2);
+
+    const leg3 = new THREE.Mesh(legGeometry, legMaterial);
+    leg3.position.set(halfWidth, legY, -halfDepth);
+    tableGroup.add(leg3);
+
+    const leg4 = new THREE.Mesh(legGeometry, legMaterial);
+    leg4.position.set(-halfWidth, legY, -halfDepth);
+    tableGroup.add(leg4);
+
+    tableGroup.position.set(0, 0, 0); // Position on ground
+    scene.add(tableGroup);
+    window.selectObject(tableGroup);
+    document.getElementById('project-message').textContent = "Table added. Double-click to edit material.";
+};
+
+/**
+ * Adds a simple chair to the scene.
+ */
+window.addChair = function() {
+    const chairWidth = 0.5;
+    const chairHeight = 0.9;
+    const chairDepth = 0.5;
+    const legThickness = 0.05;
+    const seatHeight = 0.45;
+    const seatThickness = 0.05;
+
+    const chairGroup = new THREE.Group();
+    chairGroup.userData.isCustomComponent = true;
+    chairGroup.userData.componentType = 'chair';
+    chairGroup.userData.width = chairWidth;
+    chairGroup.userData.height = chairHeight;
+    chairGroup.userData.depth = chairDepth;
+
+    // Seat
+    const seatGeometry = new THREE.BoxGeometry(chairWidth, seatThickness, chairDepth);
+    const seatMaterial = createMaterial(0x8B4513, 'wood'); // SaddleBrown for seat
+    const seat = new THREE.Mesh(seatGeometry, seatMaterial);
+    seat.position.y = seatHeight - (seatThickness / 2);
+    chairGroup.add(seat);
+
+    // Backrest
+    const backrestHeight = chairHeight - seatHeight;
+    const backrestGeometry = new THREE.BoxGeometry(chairWidth, backrestHeight, legThickness);
+    const backrestMaterial = createMaterial(0x8B4513, 'wood');
+    const backrest = new THREE.Mesh(backrestGeometry, backrestMaterial);
+    backrest.position.set(0, seatHeight + (backrestHeight / 2), -(chairDepth / 2) + (legThickness / 2));
+    chairGroup.add(backrest);
+
+    // Legs
+    const legHeight = seatHeight;
+    const legGeometry = new THREE.BoxGeometry(legThickness, legHeight, legThickness);
+    const legMaterial = createMaterial(0x8B4513, 'wood');
+
+    const halfWidth = chairWidth / 2 - legThickness / 2;
+    const halfDepth = chairDepth / 2 - legThickness / 2;
+    const legY = legHeight / 2;
+
+    const leg1 = new THREE.Mesh(legGeometry, legMaterial);
+    leg1.position.set(halfWidth, legY, halfDepth);
+    chairGroup.add(leg1);
+
+    const leg2 = new THREE.Mesh(legGeometry, legMaterial);
+    leg2.position.set(-halfWidth, legY, halfDepth);
+    chairGroup.add(leg2);
+
+    const leg3 = new THREE.Mesh(legGeometry, legMaterial);
+    leg3.position.set(halfWidth, legY, -halfDepth);
+    chairGroup.add(leg3);
+
+    const leg4 = new THREE.Mesh(legGeometry, legMaterial);
+    leg4.position.set(-halfWidth, legY, -halfDepth);
+    chairGroup.add(leg4);
+
+    chairGroup.position.set(0, 0, 0);
+    scene.add(chairGroup);
+    window.selectObject(chairGroup);
+    document.getElementById('project-message').textContent = "Chair added. Double-click to edit material.";
+};
+
+/**
+ * Adds a simple couch to the scene.
+ */
+window.addCouch = function() {
+    const couchWidth = 2.5;
+    const couchHeight = 0.8;
+    const couchDepth = 1.0;
+    const seatHeight = 0.35;
+    const armrestWidth = 0.15;
+    const backrestHeight = 0.4;
+
+    const couchGroup = new THREE.Group();
+    couchGroup.userData.isCustomComponent = true;
+    couchGroup.userData.componentType = 'couch';
+    couchGroup.userData.width = couchWidth;
+    couchGroup.userData.height = couchHeight;
+    couchGroup.userData.depth = couchDepth;
+
+    const couchMaterial = createMaterial(0x6B8E23, 'none'); // Olive Drab color
+
+    // Main seat cushion
+    const seatGeometry = new THREE.BoxGeometry(couchWidth - armrestWidth * 2, seatHeight, couchDepth * 0.9);
+    const seat = new THREE.Mesh(seatGeometry, couchMaterial);
+    seat.position.y = seatHeight / 2;
+    couchGroup.add(seat);
+
+    // Backrest
+    const backrestGeometry = new THREE.BoxGeometry(couchWidth, backrestHeight, armrestWidth);
+    const backrest = new THREE.Mesh(backrestGeometry, couchMaterial);
+    backrest.position.set(0, seatHeight + backrestHeight / 2, -(couchDepth / 2) + (armrestWidth / 2));
+    couchGroup.add(backrest);
+
+    // Armrests
+    const armrestGeometry = new THREE.BoxGeometry(armrestWidth, couchHeight, couchDepth);
+    const armrestLeft = new THREE.Mesh(armrestGeometry, couchMaterial);
+    armrestLeft.position.set(-(couchWidth / 2) + (armrestWidth / 2), couchHeight / 2, 0);
+    couchGroup.add(armrestLeft);
+
+    const armrestRight = new THREE.Mesh(armrestGeometry, couchMaterial);
+    armrestRight.position.set((couchWidth / 2) - (armrestWidth / 2), couchHeight / 2, 0);
+    couchGroup.add(armrestRight);
+
+    couchGroup.position.set(0, 0, 0);
+    scene.add(couchGroup);
+    window.selectObject(couchGroup);
+    document.getElementById('project-message').textContent = "Couch added. Double-click to edit material.";
+};
 
 
 /**
@@ -1780,24 +2109,326 @@ function createOffsetFloorMesh(width, height, depth) {
 window.applyColorToSelected = function() {
     if (selectedObject) {
         const newColor = colorPickerElement.value;
-        // If it's a window, apply color to the glass material
-        if (selectedObject.userData.componentType === 'window' && selectedObject.children.length > 0) {
-            // Find the glass mesh within the window group (assuming it's the first child)
-            const glassMesh = selectedObject.children.find(child => child.material && child.material.transparent);
-            if (glassMesh && glassMesh.material) {
-                glassMesh.material.color.set(newColor);
-                selectedObject.userData.material = { color: glassMesh.material.color.getHex() };
-            }
-        } else {
-            // For other objects, apply to their main material
-            selectedObject.material.color.set(newColor);
-            selectedObject.userData.material = { color: selectedObject.material.color.getHex() };
+        const color = new THREE.Color(newColor).getHex();
+
+        // If X-Ray mode is active, update the original material's color
+        let targetMaterial = selectedObject.material;
+        if (originalMaterials.has(selectedObject.uuid)) {
+            targetMaterial = originalMaterials.get(selectedObject.uuid);
+        }
+
+        if (selectedObject.userData.componentType === 'window' || selectedObject.userData.componentType === 'door') {
+            // For groups, find the main mesh (glass/panel) and apply color
+            selectedObject.traverse(child => {
+                if (child instanceof THREE.Mesh && (child.material.transparent || child.userData.isPanel)) { // Target glass or main door panel
+                    child.material.color.set(newColor);
+                }
+            });
+            selectedObject.userData.material.color = color; // Update stored color
+        } else if (targetMaterial) {
+            targetMaterial.color.set(newColor);
+            selectedObject.userData.material.color = color; // Update stored color
         }
         document.getElementById('project-message').textContent = `Color applied to ${selectedObject.userData.componentType || 'object'}.`;
     } else {
         document.getElementById('project-message').textContent = "No object selected to apply color.";
     }
 };
+
+/**
+ * Applies the selected texture to the currently selected object.
+ */
+window.applyTextureToSelected = function() {
+    if (selectedObject) {
+        const textureName = textureSelectElement.value;
+        let newMaterial;
+        let currentOriginalMaterial = originalMaterials.has(selectedObject.uuid) ? originalMaterials.get(selectedObject.uuid) : selectedObject.material;
+
+        // Ensure we have a material to work with, especially for groups like windows/doors
+        // For windows/doors, we'll apply texture to the frame, and keep glass transparent
+        if (selectedObject.userData.componentType === 'window' || selectedObject.userData.componentType === 'door') {
+            selectedObject.traverse(child => {
+                if (child instanceof THREE.Mesh && child.material && !child.material.transparent && !child.userData.isPanel) { // Target frame, not glass/panel
+                    const frameColor = child.material.color.getHex();
+                    if (textureName === 'none') {
+                        newMaterial = new THREE.MeshStandardMaterial({ color: frameColor });
+                    } else if (textures[textureName]) {
+                        newMaterial = new THREE.MeshStandardMaterial({
+                            map: textures[textureName],
+                            color: frameColor
+                        });
+                    } else {
+                        document.getElementById('project-message').textContent = "Texture not found.";
+                        return;
+                    }
+                    child.material.dispose(); // Dispose old material
+                    child.material = newMaterial;
+                } else if (child instanceof THREE.Mesh && child.userData.isPanel) { // For door panel
+                    const panelColor = child.material.color.getHex();
+                    if (textureName === 'none') {
+                        newMaterial = new THREE.MeshStandardMaterial({ color: panelColor });
+                    } else if (textures[textureName]) {
+                        newMaterial = new THREE.MeshStandardMaterial({
+                            map: textures[textureName],
+                            color: panelColor
+                        });
+                    } else {
+                        document.getElementById('project-message').textContent = "Texture not found.";
+                        return;
+                    }
+                    child.material.dispose(); // Dispose old material
+                    child.material = newMaterial;
+                }
+            });
+            selectedObject.userData.material.texture = textureName; // Update stored texture name for the group
+        } else if (currentOriginalMaterial) { // For single meshes
+            const currentColor = currentOriginalMaterial.color.getHex();
+            if (textureName === 'none') {
+                newMaterial = new THREE.MeshStandardMaterial({ color: currentColor });
+            } else if (textures[textureName]) {
+                newMaterial = new THREE.MeshStandardMaterial({
+                    map: textures[textureName],
+                    color: currentColor
+                });
+            } else {
+                document.getElementById('project-message').textContent = "Texture not found.";
+                return;
+            }
+
+            if (selectedObject.material && selectedObject.material !== currentOriginalMaterial) {
+                selectedObject.material.dispose();
+            }
+
+            selectedObject.material = newMaterial;
+            originalMaterials.set(selectedObject.uuid, newMaterial); // Update original material reference
+
+            selectedObject.userData.material.texture = textureName;
+            selectedObject.userData.material.color = newMaterial.color.getHex();
+
+            if (isXRayMode) {
+                applyXRayMaterial(selectedObject, true);
+            }
+        }
+        document.getElementById('project-message').textContent = `Texture "${textureName}" applied to ${selectedObject.userData.componentType || 'object'}.`;
+    } else {
+        document.getElementById('project-message').textContent = "No object selected to apply texture.";
+    }
+};
+
+/**
+ * Applies a CSG cut (subtraction) to a base mesh using a cutter mesh.
+ * This function replaces the base mesh in the scene with the new CSG result.
+ * @param {THREE.Mesh} baseMesh - The mesh to be cut (e.g., a wall).
+ * @param {THREE.Object3D} cutterObject - The object used to cut (e.g., a window group or door group).
+ * @param {string} operationType - 'subtract', 'union', or 'intersect'.
+ */
+function applyCSGCut(baseMesh, cutterObject, operationType) {
+    if (!baseMesh || !cutterObject) return;
+
+    // Create a temporary mesh from the cutter's bounding box or a simple representation
+    // For windows/doors, we need a simple box that represents the hole they cut.
+    const cutterGeometry = new THREE.BoxGeometry(
+        cutterObject.userData.width,
+        cutterObject.userData.height,
+        cutterObject.userData.depth
+    );
+    const cutterMesh = new THREE.Mesh(cutterGeometry);
+    cutterMesh.position.copy(cutterObject.position);
+    cutterMesh.rotation.copy(cutterObject.rotation);
+    cutterMesh.scale.copy(cutterObject.scale);
+
+    // Ensure the base mesh is a CSG-compatible mesh (BufferGeometry)
+    // If it's already a CSG result, it will be a BufferGeometry.
+    // If it's a primitive like a new wall, convert it.
+    let csgBaseMesh = baseMesh;
+    if (!(baseMesh.geometry instanceof THREE.BufferGeometry)) {
+        const tempGeometry = new THREE.BufferGeometry().fromGeometry(baseMesh.geometry);
+        csgBaseMesh = new THREE.Mesh(tempGeometry, baseMesh.material);
+        csgBaseMesh.position.copy(baseMesh.position);
+        csgBaseMesh.rotation.copy(baseMesh.rotation);
+        csgBaseMesh.scale.copy(baseMesh.scale);
+        csgBaseMesh.uuid = baseMesh.uuid; // Keep original UUID
+        csgBaseMesh.userData = { ...baseMesh.userData }; // Copy user data
+    }
+
+
+    const csg = new CSG();
+    let newResultMesh;
+
+    try {
+        if (operationType === 'subtract') {
+            csg.subtract(csgBaseMesh, cutterMesh);
+        } else if (operationType === 'union') {
+            csg.union(csgBaseMesh, cutterMesh);
+        } else if (operationType === 'intersect') {
+            csg.intersect(csgBaseMesh, cutterMesh);
+        }
+        newResultMesh = csg.toMesh();
+    } catch (e) {
+        console.error("CSG operation failed:", e);
+        document.getElementById('project-message').textContent = "CSG operation failed. Invalid geometry or operation.";
+        return;
+    }
+
+    // Transfer original material and user data to the new mesh
+    newResultMesh.material = baseMesh.material; // Keep the original material
+    newResultMesh.userData = { ...baseMesh.userData };
+    newResultMesh.position.copy(baseMesh.position);
+    newResultMesh.rotation.copy(baseMesh.rotation);
+    newResultMesh.scale.copy(baseMesh.scale);
+    newResultMesh.uuid = baseMesh.uuid; // Maintain UUID for selection/saving
+
+    // Remove old base mesh and add new one
+    scene.remove(baseMesh);
+    if (baseMesh.geometry) baseMesh.geometry.dispose();
+    if (baseMesh.material) {
+        if (Array.isArray(baseMesh.material)) {
+            baseMesh.material.forEach(m => m.dispose());
+        } else {
+            baseMesh.material.dispose();
+        }
+    }
+    scene.add(newResultMesh);
+
+    // Update the reference in selectedObject if it was the baseMesh
+    if (selectedObject === baseMesh) {
+        selectedObject = newResultMesh;
+        // Update selection outline to new mesh
+        if (selectionOutline) {
+            scene.remove(selectionOutline);
+            selectionOutline = new THREE.BoxHelper(selectedObject, SELECTION_COLOR);
+            scene.add(selectionOutline);
+        }
+    }
+
+    // Store the CSG operation in the cutter's userData for saving/loading
+    const operation = {
+        type: operationType,
+        targetId: baseMesh.uuid, // The ID of the wall being cut
+        cutterId: cutterObject.uuid, // The ID of the window/door doing the cutting
+        cutterPosition: { x: cutterObject.position.x, y: cutterObject.position.y, z: cutterObject.position.z },
+        cutterRotation: { x: cutterObject.rotation.x, y: cutterObject.rotation.y, z: cutterObject.rotation.z },
+        cutterScale: { x: cutterObject.scale.x, y: cutterObject.scale.y, z: cutterObject.scale.z },
+        cutterGeometry: { width: cutterObject.userData.width, height: cutterObject.userData.height, depth: cutterObject.userData.depth }
+    };
+    // Ensure csgOperations array exists on the cutter
+    if (!cutterObject.userData.csgOperations) {
+        cutterObject.userData.csgOperations = [];
+    }
+    // Add or update the operation for this specific target wall
+    const existingOpIndex = cutterObject.userData.csgOperations.findIndex(op => op.targetId === baseMesh.uuid);
+    if (existingOpIndex > -1) {
+        cutterObject.userData.csgOperations[existingOpIndex] = operation;
+    } else {
+        cutterObject.userData.csgOperations.push(operation);
+    }
+}
+
+/**
+ * Adds the current camera position and target to the tour points.
+ */
+window.addTourPoint = function() {
+    tourPoints.push({
+        position: camera.position.clone(),
+        target: cameraTarget.clone() // Or camera.getWorldDirection for walk mode
+    });
+    renderTourPointsList();
+    document.getElementById('model-status').textContent = `Tour point ${tourPoints.length} added.`;
+};
+
+/**
+ * Renders the list of tour points in the UI.
+ */
+function renderTourPointsList() {
+    const tourPointsUl = document.getElementById('tour-points-ul');
+    tourPointsUl.innerHTML = '';
+    if (tourPoints.length === 0) {
+        tourPointsUl.innerHTML = '<li>No tour points added yet.</li>';
+        return;
+    }
+    tourPoints.forEach((point, index) => {
+        const li = document.createElement('li');
+        li.textContent = `Point ${index + 1}: Pos(${point.position.x.toFixed(1)}, ${point.position.y.toFixed(1)}, ${point.position.z.toFixed(1)})`;
+        tourPointsUl.appendChild(li);
+    });
+}
+
+/**
+ * Clears all stored tour points.
+ */
+window.clearTourPoints = function() {
+    tourPoints = [];
+    renderTourPointsList();
+    document.getElementById('model-status').textContent = "All tour points cleared.";
+};
+
+/**
+ * Starts the virtual tour animation.
+ */
+window.startTour = function() {
+    if (tourPoints.length < 2) {
+        document.getElementById('project-message').textContent = "Need at least 2 tour points to start a tour.";
+        return;
+    }
+    if (isTourActive) return; // Already touring
+
+    isTourActive = true;
+    currentTourPointIndex = 0;
+    document.getElementById('model-status').textContent = "Tour started.";
+    window.stopTour(); // Ensure any previous animation is stopped
+    animateTour();
+};
+
+/**
+ * Stops the virtual tour animation.
+ */
+window.stopTour = function() {
+    isTourActive = false;
+    if (tourAnimationId) {
+        cancelAnimationFrame(tourAnimationId);
+        tourAnimationId = null;
+    }
+    document.getElementById('model-status').textContent = "Tour stopped.";
+};
+
+/**
+ * Animates the camera along the defined tour path.
+ */
+function animateTour() {
+    if (!isTourActive || tourPoints.length < 2) {
+        window.stopTour();
+        return;
+    }
+
+    const startPoint = tourPoints[currentTourPointIndex];
+    const endPoint = tourPoints[(currentTourPointIndex + 1) % tourPoints.length]; // Loop back to start
+
+    const startTime = performance.now();
+
+    function moveCamera() {
+        const elapsed = performance.now() - startTime;
+        let progress = elapsed / TOUR_TRANSITION_DURATION;
+
+        if (progress > 1) {
+            progress = 1;
+        }
+
+        // Interpolate position
+        camera.position.lerpVectors(startPoint.position, endPoint.position, progress);
+
+        // Interpolate look-at target
+        cameraTarget.lerpVectors(startPoint.target, endPoint.target, progress);
+        camera.lookAt(cameraTarget);
+
+        if (progress < 1) {
+            tourAnimationId = requestAnimationFrame(moveCamera);
+        } else {
+            currentTourPointIndex = (currentTourPointIndex + 1) % tourPoints.length;
+            animateTour(); // Move to the next segment
+        }
+    }
+    tourAnimationId = requestAnimationFrame(moveCamera);
+}
 
 
 /**
@@ -1807,8 +2438,8 @@ window.applyColorToSelected = function() {
 window.animate = function() {
     requestAnimationFrame(window.animate);
 
-    // Apply object movement if an object is selected and not in walk mode or drawing/offsetting
-    if (selectedObject && !isWalkMode && !isDrawing && !isOffsetMode) {
+    // Apply object movement if an object is selected and not in walk mode or drawing/offsetting or tour active
+    if (selectedObject && !isWalkMode && !isDrawing && !isOffsetMode && !isTourActive) {
         if (objectMoveForward) selectedObject.position.z -= OBJECT_MOVE_SPEED;
         if (objectMoveBackward) selectedObject.position.z += OBJECT_MOVE_SPEED;
         if (objectMoveLeft) selectedObject.position.x -= OBJECT_MOVE_SPEED;
@@ -1816,29 +2447,24 @@ window.animate = function() {
         if (objectMoveUp) selectedObject.position.y += OBJECT_MOVE_SPEED;
         if (objectMoveDown) selectedObject.position.y -= OBJECT_MOVE_SPEED;
 
-        // Apply object rotation
         if (objectRotateLeft) selectedObject.rotation.y += OBJECT_ROTATION_SPEED;
         if (objectRotateRight) selectedObject.rotation.y -= OBJECT_ROTATION_SPEED;
 
-
-        // Update UI after object movement/rotation
         updateSelectedObjectPropertiesUI();
     }
 
     if (isWalkMode) {
-        // Handle first-person movement
         const direction = new THREE.Vector3();
         const cameraRight = new THREE.Vector3();
-        camera.getWorldDirection(direction); // Get forward direction
-        camera.getWorldDirection(cameraRight); // Start with forward for right vector
-        cameraRight.crossVectors(camera.up, direction); // Get right direction
+        camera.getWorldDirection(direction);
+        camera.getWorldDirection(cameraRight);
+        cameraRight.crossVectors(camera.up, direction);
 
         if (moveForward) camera.position.addScaledVector(direction, cameraSpeed);
         if (moveBackward) camera.position.addScaledVector(direction, -cameraSpeed);
         if (moveLeft) camera.position.addScaledVector(cameraRight, -cameraSpeed);
         if (moveRight) camera.position.addScaledVector(cameraRight, cameraSpeed);
 
-        // Keep camera at a fixed height (simple ground collision)
         if (camera.position.y < CAMERA_HEIGHT) {
             camera.position.y = CAMERA_HEIGHT;
         }

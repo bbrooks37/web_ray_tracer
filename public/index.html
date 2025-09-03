@@ -6,11 +6,39 @@
     <title>3D Home Builder Tour</title>
     <!-- Link to external CSS file -->
     <link rel="stylesheet" href="style.css">
-    <!-- Include three-bvh-csg. This is a crucial library for advanced boolean operations. -->
-    <!-- The script tag below was removed as it's already imported as a module in app.js -->
-    <!-- <script src="https://unpkg.com/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"></script> -->
     <!-- Favicon link to prevent 404 error -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏠</text></svg>" />
+
+    <!-- IMPORTANT: Load three.js (non-module) globally first -->
+    <script src="js/three.js"></script>
+    <!-- NEW: Load three-mesh-bvh.umd.js from a reliable CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/three-mesh-bvh@latest/build/three-mesh-bvh.umd.js"></script>
+    <!-- Load three-bvh-csg.umd.js (UMD build, relies on global THREE and MeshBVHLib) -->
+    <script src="https://cdn.jsdelivr.net/npm/three-bvh-csg@latest/build/three-bvh-csg.umd.js"></script>
+    <!-- Load GLTFLoader.js (non-module version from examples/js/loaders, relies on global THREE) -->
+    <script src="js/GLTFLoader.js"></script>
+
+    <!-- Firebase SDK Scripts -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+        import { getFirestore } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment for Firebase configuration
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+
+        // Initialize Firebase and get service instances
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Export the services so they can be used in app.js
+        window.firebaseApp = app;
+        window.firebaseAuth = auth;
+        window.firebaseDb = db;
+        window.firebaseAppId = appId;
+    </script>
 </head>
 <body>
     <!-- Company Logo (Option 2) -->
@@ -18,6 +46,7 @@
         <img src="https://placehold.co/150x50/cccccc/000000?text=LOGO" alt="Company Logo">
     </div>
 
+    <!-- Info Box and Status Display -->
     <div id="info-box">
         <p>This is a 3D home builder tour application.</p>
         <p>Instructions: Click and drag to rotate camera. Scroll to zoom.</p>
@@ -27,6 +56,7 @@
         <p>Midpoint: <span id="measurement-midpoint">N/A</span></p>
     </div>
 
+    <!-- Loading Overlay -->
     <div id="loading-overlay" style="display: none;">
         <div class="spinner"></div>
         <p>Loading...</p>
@@ -141,9 +171,9 @@
                 <li>[ : Move Down (Y)</li>
                 <li>] : Move Up (Y)</li>
                 <li>Shift + Arrow Left/Right: Rotate Y-axis</li>
+                <li>Double-click on object to quickly open color picker.</li>
             </ul>
             <p>Walk Mode: WASD (Move), Mouse (Look)</p>
-            <p>Double-click on object to quickly open color picker.</p>
         </div>
     </div>
 
@@ -165,7 +195,7 @@
         </div>
     </div>
 
-    <!-- Link to external JavaScript file -->
+    <!-- The script tag for app.js now includes 'type="module"' -->
     <script type="module" src="js/app.js"></script>
 </body>
 </html>

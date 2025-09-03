@@ -2,11 +2,10 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, signInAnonymously, signInWithCustomToken, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, collection, query, where, addDoc, getDocs, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-// Also include Three.js core and GLTFLoader as it's a Three.js extension
-import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js";
-import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/loaders/GLTFLoader.js";
-// CSG library will now be loaded via a script tag in index.html, not imported here.
-// import { CSG } from "https://unpkg.com/three-bvh-csg@0.0.10/dist/three-bvh-csg.umd.js"; // This line was removed
+// Three.js and GLTFLoader are now expected to be global (loaded via script tags in index.html)
+// The following lines are commented out/removed because THREE and GLTFLoader are now global.
+// import * as THREE from "./three.module.js";
+// import { GLTFLoader } from "./GLTFLoader.js";
 
 // Global Firebase variables
 window.firebaseApp = null;
@@ -20,17 +19,18 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
 // Your web app's Firebase configuration (pasted directly as provided by the user)
 const firebaseConfig = {
-    apiKey: "AIzaSyBB3JBHBUh2GbukA_n3YeMBeaC7y-FmUII",
-    authDomain: "particle-simulation-app.firebaseapp.com",
-    projectId: "particle-simulation-app",
-    storageBucket: "particle-simulation-app.firebasestorage.app",
-    messagingSenderId: "555581283266",
-    appId: "1:555581283266:web:9197bb66f9289aac0a545b",
-    // measurementId: "G-EVHNNE4HT2" // Optional, removed as not explicitly requested for use
+  apiKey: "AIzaSyCuO2WyDASCRFGPp7gixoNcVq1RJ7x6UOw",
+  authDomain: "home-builder-3d.firebaseapp.com",
+  projectId: "home-builder-3d",
+  storageBucket: "home-builder-3d.firebasestorage.app",
+  messagingSenderId: "632695052749",
+  appId: "1:632695052749:web:7f7725a9a4d44d169d8c84",
+  measurementId: "G-55TVNQQ8XZ"
 };
 
 // Initialize Firebase and set up authentication listener
 window.onload = async function() {
+    debugger; // Debugger at the start of window.onload
     try {
         window.firebaseApp = initializeApp(firebaseConfig);
         window.db = getFirestore(window.firebaseApp);
@@ -43,6 +43,7 @@ window.onload = async function() {
 
 
         onAuthStateChanged(window.auth, async (user) => {
+            debugger; // Debugger inside auth state change
             if (user) {
                 window.userId = user.uid;
                 console.log("User logged in:", window.userId);
@@ -84,6 +85,7 @@ window.onload = async function() {
 
 // --- Authentication Functions ---
 window.signUp = async function() {
+    debugger; // Debugger for signup
     const email = document.getElementById('signup-email').value;
     const password = document.getElementById('signup-password').value;
     if (!email || !password) {
@@ -102,6 +104,7 @@ window.signUp = async function() {
 };
 
 window.signIn = async function() {
+    debugger; // Debugger for signin
     const email = document.getElementById('login-email').value;
     const password = document.getElementById('login-password').value;
     if (!email || !password) {
@@ -120,6 +123,7 @@ window.signIn = async function() {
 };
 
 window.signOutUser = async function() {
+    debugger; // Debugger for signout
     try {
         await signOut(window.auth);
         document.getElementById('auth-message').textContent = "Signed out successfully.";
@@ -137,6 +141,7 @@ window.signOutUser = async function() {
  * This function serializes the components and their properties, including CSG operations.
  */
 window.saveProject = async function() {
+    debugger; // Debugger for saveProject
     if (!window.userId || !window.db) {
         console.warn("User not logged in or Firestore not initialized.");
         document.getElementById('project-message').textContent = "Please log in to save your project.";
@@ -221,8 +226,9 @@ window.saveProject = async function() {
  * Loads projects for the current user and displays them.
  */
 window.loadProjects = async function() {
+    debugger; // Debugger for loadProjects
     if (!window.userId || !window.db) {
-        console.warn("User not logged in or Firestore not initialized. Cannot load projects.");
+        console.warn("User not logged in or Firestore not initialized.");
         return;
     }
 
@@ -250,6 +256,7 @@ window.loadProjects = async function() {
  * @param {Array} projects - An array of project objects.
  */
 window.renderProjectsList = function(projects) {
+    debugger; // Debugger for renderProjectsList
     const projectsListElement = document.getElementById('projects-list');
     projectsListElement.innerHTML = ''; // Clear existing list
 
@@ -295,6 +302,7 @@ window.renderProjectsList = function(projects) {
  * @param {string} projectId - The ID of the project to load.
  */
 window.loadSpecificProject = async function(projectId) {
+    debugger; // Debugger for loadSpecificProject
     if (!window.userId || !window.db) {
         console.warn("User not logged in or Firestore not initialized.");
         return;
@@ -325,8 +333,31 @@ window.loadSpecificProject = async function(projectId) {
                     const material = createMaterial(loadedColor, loadedTextureName);
 
                     if (compData.type === 'wall' || compData.type === 'floor' || compData.type === 'cube' || compData.type === 'roof' || compData.type === 'rug' || compData.type === 'table' || compData.type === 'chair' || compData.type === 'couch' || compData.type === 'wallPanel') {
-                        const geometry = new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth);
-                        mesh = new THREE.Mesh(geometry, material);
+                        // Use helper functions for creating these meshes
+                        if (compData.type === 'wall') {
+                            mesh = createWallMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'floor') {
+                            mesh = createFloorMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'cube') {
+                            mesh = new THREE.Mesh(new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth), material);
+                        } else if (compData.type === 'roof') {
+                            mesh = new THREE.Mesh(new THREE.BoxGeometry(compData.geometry.width, compData.geometry.height, compData.geometry.depth), material);
+                        } else if (compData.type === 'rug') {
+                            mesh = createOffsetFloorMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'table') {
+                             // Recreate table as a group
+                            mesh = createTableMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'chair') {
+                            // Recreate chair as a group
+                            mesh = createChairMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'couch') {
+                            // Recreate couch as a group
+                            mesh = createCouchMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        } else if (compData.type === 'wallPanel') {
+                             mesh = createWallMesh(compData.geometry.width, compData.geometry.height, compData.geometry.depth, material);
+                        }
+
+
                         mesh.userData.isCustomComponent = true;
                         mesh.userData.componentType = compData.type;
                         mesh.userData.width = compData.geometry.width;
@@ -372,12 +403,14 @@ window.loadSpecificProject = async function(projectId) {
                             // Perform CSG subtractions sequentially
                             let currentWallMesh = wallMesh;
                             cuttersForThisWall.forEach(cutter => {
+                                debugger; // Debugger before CSG operation in loadSpecificProject
                                 const cutterGeometry = new THREE.BoxGeometry(cutter.geometry.width, cutter.geometry.height, cutter.geometry.depth);
                                 const cutterMesh = new THREE.Mesh(cutterGeometry);
                                 cutterMesh.position.set(cutter.position.x, cutter.position.y, cutter.position.z);
                                 cutterMesh.rotation.set(cutter.rotation.x, cutter.rotation.y, cutter.rotation.z);
                                 cutterMesh.scale.set(cutter.scale.x, cutter.scale.y, cutter.scale.z);
 
+                                // CSG library is now globally available via <script> tag
                                 const csg = new CSG();
                                 csg.subtract(currentWallMesh, cutterMesh);
                                 const newResultMesh = csg.toMesh();
@@ -471,6 +504,7 @@ window.loadSpecificProject = async function(projectId) {
  * @param {string} projectId - The ID of the project to delete.
  */
 window.deleteProject = async function(projectId) {
+    debugger; // Debugger for deleteProject
     if (!window.userId || !window.db) {
         console.warn("User not logged in or Firestore not initialized.");
         return;
@@ -489,6 +523,7 @@ window.deleteProject = async function(projectId) {
 
 // --- Custom Modal for Confirmation (replacing alert/confirm) ---
 window.showConfirmModal = function(message, onConfirm) {
+    debugger; // Debugger for showConfirmModal
     const modalElement = document.getElementById('custom-confirm-modal');
     document.getElementById('confirm-modal-message').textContent = message;
     modalElement.style.display = 'flex'; // Show the modal
@@ -620,6 +655,7 @@ const TOUR_TRANSITION_DURATION = 3000; // Milliseconds for transition between po
  * Sets up the Three.js scene, camera, and renderer.
  */
 window.setupScene = function() {
+    debugger; // Debugger at the start of setupScene
     if (scene) return; // Only setup scene once
 
     // Scene
@@ -640,8 +676,8 @@ window.setupScene = function() {
 
     // Camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 10, 20);
-    camera.lookAt(0, 0, 0);
+    camera.position.set(0, 10, 20); // Positioned to look towards the origin
+    camera.lookAt(0, 0, 0); // Looking directly at the origin for central vanishing point
 
     // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -658,19 +694,41 @@ window.setupScene = function() {
     directionalLight2.position.set(-1, -1, -1).normalize();
     scene.add(directionalLight2);
 
-    // Ground Plane
-    const planeGeometry = new THREE.PlaneGeometry(100, 100);
-    const planeMaterial = new THREE.MeshStandardMaterial({
-        color: 0x334155,
-        roughness: 0.7,
-        metalness: 0.1,
+    // --- Ground Plane for Blueprint Effect (Single Point Perspective) ---
+    // Remove the old ground plane:
+    // const planeGeometry = new THREE.PlaneGeometry(100, 100);
+    // const planeMaterial = new THREE.MeshStandardMaterial({
+    //     color: 0x334155,
+    //     roughness: 0.7,
+    //     metalness: 0.1,
+    //     side: THREE.DoubleSide
+    // });
+    // const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+    // plane.rotation.x = Math.PI / 2;
+    // plane.position.y = -0.01;
+    // plane.name = 'groundPlane';
+    // scene.add(plane);
+
+    // Add a GridHelper to emphasize perspective lines
+    const gridHelper = new THREE.GridHelper(100, 100, 0x00ffff, 0x008888); // Size, Divisions, Center Line Color, Grid Color
+    gridHelper.position.y = 0; // Position slightly above the visual plane if used
+    gridHelper.name = 'gridHelper';
+    scene.add(gridHelper);
+
+    // Add a semi-transparent plane to simulate blueprint paper
+    const blueprintPlaneGeometry = new THREE.PlaneGeometry(100, 100);
+    const blueprintPlaneMaterial = new THREE.MeshBasicMaterial({
+        color: 0x1a202c, // Dark background color
+        transparent: true,
+        opacity: 0.8, // Slightly transparent to let grid show through
         side: THREE.DoubleSide
     });
-    const plane = new THREE.Mesh(planeGeometry, planeMaterial);
-    plane.rotation.x = Math.PI / 2;
-    plane.position.y = -0.01;
-    plane.name = 'groundPlane';
-    scene.add(plane);
+    const blueprintPlane = new THREE.Mesh(blueprintPlaneGeometry, blueprintPlaneMaterial);
+    blueprintPlane.rotation.x = Math.PI / 2;
+    blueprintPlane.position.y = -0.02; // Slightly below grid to avoid Z-fighting
+    blueprintPlane.name = 'groundPlane'; // Keep the name for raycasting
+    scene.add(blueprintPlane);
+
 
     // Add AxesHelper
     const axesHelper = new THREE.AxesHelper(10);
@@ -710,6 +768,7 @@ window.setupScene = function() {
  * Loads predefined textures for application to objects.
  */
 function loadTextures() {
+    debugger; // Debugger at the start of loadTextures
     const texturePaths = {
         wood: 'https://threejs.org/examples/textures/hardwood2_diffuse.jpg',
         tile: 'https://threejs.org/examples/textures/tiles.jpg',
@@ -740,6 +799,7 @@ function loadTextures() {
  * This function handles disposing of geometries and materials to prevent memory leaks.
  */
 window.clearCustomComponents = function() {
+    debugger; // Debugger for clearCustomComponents
     const componentsToRemove = [];
     scene.traverse(object => {
         if (object.userData && object.userData.isCustomComponent) {
@@ -782,6 +842,7 @@ window.clearCustomComponents = function() {
  * Handles window resize events to update camera aspect ratio and renderer size.
  */
 function onWindowResize() {
+    debugger; // Debugger for onWindowResize
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -792,6 +853,7 @@ function onWindowResize() {
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseDown(event) {
+    debugger; // Debugger for onMouseDown
     if (isWalkMode || isDrawing || isOffsetMode || isTourActive) return;
 
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -827,6 +889,7 @@ function onMouseDown(event) {
  * Handles mouse up event to stop camera rotation or object drag.
  */
 function onMouseUp() {
+    debugger; // Debugger for onMouseUp
     if (isDraggingCamera) {
         isDraggingCamera = false;
         renderer.domElement.style.cursor = 'auto';
@@ -838,6 +901,7 @@ function onMouseUp() {
  * @param {MouseEvent} event - The mouse event.
  */
 function onMouseMove(event) {
+    debugger; // Debugger for onMouseMove
     if (isWalkMode) {
         const movementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
         const movementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
@@ -874,6 +938,7 @@ function onMouseMove(event) {
  * @param {WheelEvent} event - The mouse wheel event.
  */
 function onMouseWheel(event) {
+    debugger; // Debugger for onMouseWheel
     if (!isWalkMode) {
         event.preventDefault();
         const zoomAmount = event.deltaY * zoomSpeed;
@@ -894,6 +959,7 @@ function onMouseWheel(event) {
  * @param {KeyboardEvent} event - The keyboard event.
  */
 function onKeyDown(event) {
+    debugger; // Debugger for onKeyDown
     if (isWalkMode) {
         switch (event.code) {
             case 'KeyW': moveForward = true; break;
@@ -924,6 +990,7 @@ function onKeyDown(event) {
  * @param {KeyboardEvent} event - The keyboard event.
  */
 function onKeyUp(event) {
+    debugger; // Debugger for onKeyUp
     if (isWalkMode) {
         switch (event.code) {
             case 'KeyW': moveForward = false; break;
@@ -947,6 +1014,7 @@ function onKeyUp(event) {
  * Updates the UI display for the selected object's properties.
  */
 function updateSelectedObjectPropertiesUI() {
+    debugger; // Debugger for updateSelectedObjectPropertiesUI
     if (selectedObject) {
         propTypeElement.textContent = selectedObject.userData.componentType || 'Unknown';
         propPositionElement.textContent = `X: ${selectedObject.position.x.toFixed(2)}, Y: ${selectedObject.position.y.toFixed(2)}, Z: ${selectedObject.position.z.toFixed(2)}`;
@@ -986,6 +1054,7 @@ function updateSelectedObjectPropertiesUI() {
  * Toggles between orbit mode and first-person walk mode.
  */
 window.toggleWalkMode = function() {
+    debugger; // Debugger for toggleWalkMode
     isWalkMode = !isWalkMode;
     const toggleBtn = document.getElementById('toggle-walk-mode-btn');
     if (isWalkMode) {
@@ -1028,6 +1097,7 @@ window.toggleWalkMode = function() {
  * Toggles the measurement tool on/off.
  */
 window.toggleMeasurementMode = function() {
+    debugger; // Debugger for toggleMeasurementMode
     isMeasuring = !isMeasuring;
     const measureBtn = document.getElementById('measure-distance-btn');
     if (isMeasuring) {
@@ -1048,6 +1118,7 @@ window.toggleMeasurementMode = function() {
  * Toggles X-Ray view mode for custom components.
  */
 window.toggleXRayMode = function() {
+    debugger; // Debugger for toggleXRayMode
     isXRayMode = !isXRayMode;
     const xrayBtn = document.getElementById('toggle-xray-btn');
 
@@ -1075,6 +1146,7 @@ window.toggleXRayMode = function() {
  * @param {boolean} apply - True to apply X-Ray, false to remove.
  */
 function applyXRayMaterial(mesh, apply) {
+    debugger; // Debugger for applyXRayMaterial
     if (apply) {
         if (!originalMaterials.has(mesh.uuid)) {
             originalMaterials.set(mesh.uuid, mesh.material);
@@ -1097,6 +1169,7 @@ function applyXRayMaterial(mesh, apply) {
  * Clears all visual measurement points and resets display.
  */
 window.clearMeasurements = function() {
+    debugger; // Debugger for clearMeasurements
     selectedMeasurementPoints.forEach(p => scene.remove(p));
     selectedMeasurementPoints = [];
     measurementSpheres.forEach(s => scene.remove(s));
@@ -1116,6 +1189,7 @@ window.clearMeasurements = function() {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasClick(event) {
+    debugger; // Debugger for onCanvasClick
     if (isDraggingCamera || isDraggingObject || isTourActive) return;
 
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -1127,6 +1201,7 @@ function onCanvasClick(event) {
         if (object.userData && object.userData.isCustomComponent) {
             interactableObjects.push(object);
         }
+        // Only interact with the blueprint plane for drawing/measurement
         if (object.name === 'groundPlane') {
             interactableObjects.push(object);
         }
@@ -1218,6 +1293,7 @@ function onCanvasClick(event) {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasDblClick(event) {
+    debugger; // Debugger for onCanvasDblClick
     if (isTourActive) return; // Disable during tour
 
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -1247,6 +1323,7 @@ function onCanvasDblClick(event) {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasMouseMove(event) {
+    debugger; // Debugger for onCanvasMouseMove
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -1279,6 +1356,7 @@ function onCanvasMouseMove(event) {
  * @param {MouseEvent} event - The mouse event.
  */
 function onCanvasMouseUp(event) {
+    debugger; // Debugger for onCanvasMouseUp
     if (isDrawing) {
         const intersects = raycaster.intersectObject(scene.getObjectByName('groundPlane'));
         if (intersects.length > 0) {
@@ -1308,6 +1386,7 @@ function onCanvasMouseUp(event) {
  * @param {THREE.Object3D} object - The object to select (can be Mesh or Group).
  */
 window.selectObject = function(object) {
+    debugger; // Debugger for selectObject
     if (selectedObject === object) return;
 
     window.deselectObject();
@@ -1324,6 +1403,7 @@ window.selectObject = function(object) {
  * Deselects the current 3D object and clears the UI.
  */
 window.deselectObject = function() {
+    debugger; // Debugger for deselectObject
     if (selectedObject) {
         if (selectionOutline) {
             scene.remove(selectionOutline);
@@ -1338,6 +1418,7 @@ window.deselectObject = function() {
  * Deletes the currently selected object from the scene.
  */
 window.deleteSelectedObject = function() {
+    debugger; // Debugger for deleteSelectedObject
     if (selectedObject) {
         window.showConfirmModal("Are you sure you want to delete the selected object?", () => {
             scene.remove(selectedObject);
@@ -1379,6 +1460,7 @@ window.deleteSelectedObject = function() {
  * @returns {THREE.MeshStandardMaterial} The created material.
  */
 function createMaterial(color, textureName) {
+    debugger; // Debugger for createMaterial
     let material;
     if (textureName && textures[textureName]) {
         material = new THREE.MeshStandardMaterial({
@@ -1392,10 +1474,52 @@ function createMaterial(color, textureName) {
 }
 
 /**
+ * Helper function to create a wall mesh.
+ * @param {number} width - Width of the wall.
+ * @param {number} height - Height of the wall.
+ * @param {number} depth - Depth (thickness) of the wall.
+ * @param {THREE.Material} [material] - Optional material. If not provided, uses default.
+ * @returns {THREE.Mesh} The created wall mesh.
+ */
+function createWallMesh(width, height, depth, material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none')) {
+    debugger; // Debugger for createWallMesh
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const wall = new THREE.Mesh(geometry, material);
+    wall.userData.isCustomComponent = true;
+    wall.userData.componentType = 'wall';
+    wall.userData.width = width;
+    wall.userData.height = height;
+    wall.userData.depth = depth;
+    wall.userData.csgOperations = [];
+    return wall;
+}
+
+/**
+ * Helper function to create a floor mesh.
+ * @param {number} width - Width of the floor.
+ * @param {number} height - Height (thickness) of the floor.
+ * @param {number} depth - Depth of the floor.
+ * @param {THREE.Material} [material] - Optional material. If not provided, uses default.
+ * @returns {THREE.Mesh} The created floor mesh.
+ */
+function createFloorMesh(width, height, depth, material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none')) {
+    debugger; // Debugger for createFloorMesh
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const floor = new THREE.Mesh(geometry, material);
+    floor.userData.isCustomComponent = true;
+    floor.userData.componentType = 'floor';
+    floor.userData.width = width;
+    floor.userData.height = height;
+    floor.userData.depth = depth;
+    return floor;
+}
+
+/**
  * Adds a wall component to the scene using input dimensions.
  * This function now creates a base wall mesh that can be cut by windows/doors.
  */
 window.addWall = function() {
+    debugger; // Debugger for addWall
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value);
     const depth = parseFloat(dimDepthInput.value);
@@ -1404,17 +1528,8 @@ window.addWall = function() {
         return;
     }
 
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none'); // Walls start with default color, no texture
-    const wall = new THREE.Mesh(geometry, material);
-
+    const wall = createWallMesh(width, height, depth);
     wall.position.set(0, height / 2, 0);
-    wall.userData.isCustomComponent = true;
-    wall.userData.componentType = 'wall';
-    wall.userData.width = width;
-    wall.userData.height = height;
-    wall.userData.depth = depth;
-    wall.userData.csgOperations = []; // To store operations that cut this wall
 
     scene.add(wall);
     window.selectObject(wall);
@@ -1425,6 +1540,7 @@ window.addWall = function() {
  * Adds a floor component to the scene using input dimensions.
  */
 window.addFloor = function() {
+    debugger; // Debugger for addFloor
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value);
     const depth = parseFloat(dimDepthInput.value);
@@ -1432,16 +1548,8 @@ window.addFloor = function() {
         document.getElementById('project-message').textContent = "Please enter valid positive dimensions for Floor.";
         return;
     }
-    const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = createMaterial(DEFAULT_MATERIAL_COLOR, 'none');
-    const floor = new THREE.Mesh(geometry, material);
-
+    const floor = createFloorMesh(width, height, depth);
     floor.position.set(0, height / 2, 0);
-    floor.userData.isCustomComponent = true;
-    floor.userData.componentType = 'floor';
-    floor.userData.width = width;
-    floor.userData.height = height;
-    floor.userData.depth = depth;
     scene.add(floor);
     window.selectObject(floor);
     document.getElementById('project-message').textContent = "Floor added. Select it to move/rotate/scale. Double-click to edit material.";
@@ -1451,6 +1559,7 @@ window.addFloor = function() {
  * Adds a generic cube component to the scene using input dimensions.
  */
 window.addCube = function() {
+    debugger; // Debugger for addCube
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value);
     const depth = parseFloat(dimDepthInput.value);
@@ -1478,6 +1587,7 @@ window.addCube = function() {
  * This function now creates a window (cutter) and applies a CSG subtraction to the selected wall.
  */
 window.addWindow = function() {
+    debugger; // Debugger for addWindow
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value);
     const depth = parseFloat(dimDepthInput.value); // Thickness of the window frame/glass
@@ -1510,6 +1620,7 @@ window.addWindow = function() {
  * Helper function to create a window mesh (group of frame and glass).
  */
 function createWindowMesh(width, height, depth, color) {
+    debugger; // Debugger for createWindowMesh
     const frameThickness = 0.1;
     const glassThickness = 0.01;
 
@@ -1555,6 +1666,7 @@ function createWindowMesh(width, height, depth, color) {
  * This function creates a door (cutter) and applies a CSG subtraction to the selected wall.
  */
 window.addDoor = function() {
+    debugger; // Debugger for addDoor
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value);
     const depth = parseFloat(dimDepthInput.value); // Thickness of the door
@@ -1587,6 +1699,7 @@ window.addDoor = function() {
  * Helper function to create a door mesh (group of panel and frame).
  */
 function createDoorMesh(width, height, depth, color) {
+    debugger; // Debugger for createDoorMesh
     const frameThickness = 0.1;
 
     const doorGroup = new THREE.Group();
@@ -1633,6 +1746,7 @@ function createDoorMesh(width, height, depth, color) {
  * For simplicity, this will be a flat roof for now.
  */
 window.addRoof = function() {
+    debugger; // Debugger for addRoof
     const width = parseFloat(dimWidthInput.value);
     const height = parseFloat(dimHeightInput.value); // Thickness of the roof
     const depth = parseFloat(dimDepthInput.value);
@@ -1661,6 +1775,7 @@ window.addRoof = function() {
  * @param {string} type - 'wall' or 'floor'.
  */
 window.startDrawing = function(type) {
+    debugger; // Debugger for startDrawing
     isDrawing = true;
     drawingType = type;
     document.getElementById('model-status').textContent = `Drawing ${type}: Click on the ground plane to set start point.`;
@@ -1675,6 +1790,7 @@ window.startDrawing = function(type) {
  * @param {THREE.Vector3} currentPoint - The current intersection point on the ground.
  */
 window.updateDrawing = function(currentPoint) {
+    debugger; // Debugger for updateDrawing
     if (!isDrawing || !drawingStartPoint) return;
 
     if (currentDrawingLine) {
@@ -1716,6 +1832,7 @@ window.updateDrawing = function(currentPoint) {
  * @param {THREE.Vector3} endPoint - The end point of the drawing.
  */
 window.endDrawing = function(endPoint) {
+    debugger; // Debugger for endDrawing
     if (!isDrawing) return;
 
     if (currentDrawingLine) {
@@ -1767,6 +1884,7 @@ window.endDrawing = function(endPoint) {
  * Cancels the current drawing operation.
  */
 window.cancelDrawing = function() {
+    debugger; // Debugger for cancelDrawing
     isDrawing = false;
     drawingType = '';
     drawingStartPoint = new THREE.Vector3();
@@ -1784,6 +1902,7 @@ window.cancelDrawing = function() {
  * The currently selected object must be a 'floor' or 'wall'.
  */
 window.startOffsetMode = function() {
+    debugger; // Debugger for startOffsetMode
     if (!selectedObject || (selectedObject.userData.componentType !== 'floor' && selectedObject.userData.componentType !== 'wall')) {
         document.getElementById('project-message').textContent = "Please select a floor or wall to offset.";
         return;
@@ -1801,6 +1920,7 @@ window.startOffsetMode = function() {
  * @param {THREE.Vector3} currentPoint - The current intersection point on the object.
  */
 window.updateOffsetDrawing = function(currentPoint) {
+    debugger; // Debugger for updateOffsetDrawing
     if (!isOffsetMode || !offsetReferenceObject || !offsetStartPoint) return;
 
     if (currentOffsetLine) {
@@ -1851,6 +1971,7 @@ window.updateOffsetDrawing = function(currentPoint) {
  * @param {THREE.Vector3} endPoint - The end intersection point on the object.
  */
 window.endOffsetDrawing = function(endPoint) {
+    debugger; // Debugger for endOffsetDrawing
     if (!isOffsetMode || !offsetReferenceObject) return;
 
     if (currentOffsetLine) {
@@ -1917,6 +2038,7 @@ window.endOffsetDrawing = function(endPoint) {
  * Cancels the current offset drawing operation.
  */
 window.cancelOffsetDrawing = function() {
+    debugger; // Debugger for cancelOffsetDrawing
     isOffsetMode = false;
     offsetReferenceObject = null;
     offsetStartPoint = new THREE.Vector3();
@@ -1932,9 +2054,9 @@ window.cancelOffsetDrawing = function() {
 /**
  * Helper function for creating offset floor meshes (e.g., rugs).
  */
-function createOffsetFloorMesh(width, height, depth) {
+function createOffsetFloorMesh(width, height, depth, material = new THREE.MeshStandardMaterial({ color: 0x8B0000 })) { // Red for a rug
+    debugger; // Debugger for createOffsetFloorMesh
     const geometry = new THREE.BoxGeometry(width, height, depth);
-    const material = new THREE.MeshStandardMaterial({ color: 0x8B0000 }); // Red for a rug
     const rug = new THREE.Mesh(geometry, material);
     rug.userData.isCustomComponent = true;
     rug.userData.componentType = 'rug';
@@ -1945,12 +2067,15 @@ function createOffsetFloorMesh(width, height, depth) {
 }
 
 /**
- * Adds a simple table to the scene.
+ * Helper function to create a table mesh (group of tabletop and legs).
+ * @param {number} tableWidth - Width of the table.
+ * @param {number} tableHeight - Height of the table.
+ * @param {number} tableDepth - Depth of the table.
+ * @param {THREE.Material} [material] - Optional material for the tabletop.
+ * @returns {THREE.Group} The created table group.
  */
-window.addTable = function() {
-    const tableWidth = 2;
-    const tableHeight = 0.8;
-    const tableDepth = 1;
+function createTableMesh(tableWidth, tableHeight, tableDepth, material = createMaterial(0xA0522D, 'wood')) {
+    debugger; // Debugger for createTableMesh
     const legThickness = 0.1;
 
     const tableGroup = new THREE.Group();
@@ -1962,8 +2087,7 @@ window.addTable = function() {
 
     // Tabletop
     const tabletopGeometry = new THREE.BoxGeometry(tableWidth, legThickness, tableDepth);
-    const tabletopMaterial = createMaterial(0xA0522D, 'wood'); // Sienna wood color
-    const tabletop = new THREE.Mesh(tabletopGeometry, tabletopMaterial);
+    const tabletop = new THREE.Mesh(tabletopGeometry, material);
     tabletop.position.y = tableHeight - (legThickness / 2);
     tableGroup.add(tabletop);
 
@@ -1992,19 +2116,19 @@ window.addTable = function() {
     leg4.position.set(-halfWidth, legY, -halfDepth);
     tableGroup.add(leg4);
 
-    tableGroup.position.set(0, 0, 0); // Position on ground
-    scene.add(tableGroup);
-    window.selectObject(tableGroup);
-    document.getElementById('project-message').textContent = "Table added. Double-click to edit material.";
-};
+    return tableGroup;
+}
 
 /**
- * Adds a simple chair to the scene.
+ * Helper function to create a chair mesh (group of seat, backrest, and legs).
+ * @param {number} chairWidth - Width of the chair.
+ * @param {number} chairHeight - Height of the chair.
+ * @param {number} chairDepth - Depth of the chair.
+ * @param {THREE.Material} [material] - Optional material for the seat.
+ * @returns {THREE.Group} The created chair group.
  */
-window.addChair = function() {
-    const chairWidth = 0.5;
-    const chairHeight = 0.9;
-    const chairDepth = 0.5;
+function createChairMesh(chairWidth, chairHeight, chairDepth, material = createMaterial(0x8B4513, 'wood')) {
+    debugger; // Debugger for createChairMesh
     const legThickness = 0.05;
     const seatHeight = 0.45;
     const seatThickness = 0.05;
@@ -2018,23 +2142,21 @@ window.addChair = function() {
 
     // Seat
     const seatGeometry = new THREE.BoxGeometry(chairWidth, seatThickness, chairDepth);
-    const seatMaterial = createMaterial(0x8B4513, 'wood'); // SaddleBrown for seat
-    const seat = new THREE.Mesh(seatGeometry, seatMaterial);
+    const seat = new THREE.Mesh(seatGeometry, material); // Use provided material
     seat.position.y = seatHeight - (seatThickness / 2);
     chairGroup.add(seat);
 
     // Backrest
     const backrestHeight = chairHeight - seatHeight;
     const backrestGeometry = new THREE.BoxGeometry(chairWidth, backrestHeight, legThickness);
-    const backrestMaterial = createMaterial(0x8B4513, 'wood');
-    const backrest = new THREE.Mesh(backrestGeometry, backrestMaterial);
+    const backrest = new THREE.Mesh(backrestGeometry, material); // Use provided material
     backrest.position.set(0, seatHeight + (backrestHeight / 2), -(chairDepth / 2) + (legThickness / 2));
     chairGroup.add(backrest);
 
     // Legs
     const legHeight = seatHeight;
     const legGeometry = new THREE.BoxGeometry(legThickness, legHeight, legThickness);
-    const legMaterial = createMaterial(0x8B4513, 'wood');
+    const legMaterial = createMaterial(0x8B4513, 'wood'); // SaddleBrown for legs
 
     const halfWidth = chairWidth / 2 - legThickness / 2;
     const halfDepth = chairDepth / 2 - legThickness / 2;
@@ -2056,19 +2178,19 @@ window.addChair = function() {
     leg4.position.set(-halfWidth, legY, -halfDepth);
     chairGroup.add(leg4);
 
-    chairGroup.position.set(0, 0, 0);
-    scene.add(chairGroup);
-    window.selectObject(chairGroup);
-    document.getElementById('project-message').textContent = "Chair added. Double-click to edit material.";
-};
+    return chairGroup;
+}
 
 /**
- * Adds a simple couch to the scene.
+ * Helper function to create a couch mesh (group of cushions and armrests).
+ * @param {number} couchWidth - Width of the couch.
+ * @param {number} couchHeight - Height of the couch.
+ * @param {number} couchDepth - Depth of the couch.
+ * @param {THREE.Material} [material] - Optional material for the couch.
+ * @returns {THREE.Group} The created couch group.
  */
-window.addCouch = function() {
-    const couchWidth = 2.5;
-    const couchHeight = 0.8;
-    const couchDepth = 1.0;
+function createCouchMesh(couchWidth, couchHeight, couchDepth, material = createMaterial(0x6B8E23, 'none')) {
+    debugger; // Debugger for createCouchMesh
     const seatHeight = 0.35;
     const armrestWidth = 0.15;
     const backrestHeight = 0.4;
@@ -2080,30 +2202,70 @@ window.addCouch = function() {
     couchGroup.userData.height = couchHeight;
     couchGroup.userData.depth = couchDepth;
 
-    const couchMaterial = createMaterial(0x6B8E23, 'none'); // Olive Drab color
-
     // Main seat cushion
     const seatGeometry = new THREE.BoxGeometry(couchWidth - armrestWidth * 2, seatHeight, couchDepth * 0.9);
-    const seat = new THREE.Mesh(seatGeometry, couchMaterial);
+    const seat = new THREE.Mesh(seatGeometry, material);
     seat.position.y = seatHeight / 2;
     couchGroup.add(seat);
 
     // Backrest
     const backrestGeometry = new THREE.BoxGeometry(couchWidth, backrestHeight, armrestWidth);
-    const backrest = new THREE.Mesh(backrestGeometry, couchMaterial);
+    const backrest = new THREE.Mesh(backrestGeometry, material);
     backrest.position.set(0, seatHeight + backrestHeight / 2, -(couchDepth / 2) + (armrestWidth / 2));
     couchGroup.add(backrest);
 
     // Armrests
     const armrestGeometry = new THREE.BoxGeometry(armrestWidth, couchHeight, couchDepth);
-    const armrestLeft = new THREE.Mesh(armrestGeometry, couchMaterial);
+    const armrestLeft = new THREE.Mesh(armrestGeometry, material);
     armrestLeft.position.set(-(couchWidth / 2) + (armrestWidth / 2), couchHeight / 2, 0);
     couchGroup.add(armrestLeft);
 
-    const armrestRight = new THREE.Mesh(armrestGeometry, couchMaterial);
+    const armrestRight = new THREE.Mesh(armrestGeometry, material);
     armrestRight.position.set((couchWidth / 2) - (armrestWidth / 2), couchHeight / 2, 0);
     couchGroup.add(armrestRight);
 
+    return couchGroup;
+}
+
+/**
+ * Adds a simple table to the scene.
+ */
+window.addTable = function() {
+    debugger; // Debugger for addTable
+    const tableWidth = 2;
+    const tableHeight = 0.8;
+    const tableDepth = 1;
+    const tableGroup = createTableMesh(tableWidth, tableHeight, tableDepth);
+    tableGroup.position.set(0, 0, 0); // Position on ground
+    scene.add(tableGroup);
+    window.selectObject(tableGroup);
+    document.getElementById('project-message').textContent = "Table added. Double-click to edit material.";
+};
+
+/**
+ * Adds a simple chair to the scene.
+ */
+window.addChair = function() {
+    debugger; // Debugger for addChair
+    const chairWidth = 0.5;
+    const chairHeight = 0.9;
+    const chairDepth = 0.5;
+    const chairGroup = createChairMesh(chairWidth, chairHeight, chairDepth);
+    chairGroup.position.set(0, 0, 0);
+    scene.add(chairGroup);
+    window.selectObject(chairGroup);
+    document.getElementById('project-message').textContent = "Chair added. Double-click to edit material.";
+};
+
+/**
+ * Adds a simple couch to the scene.
+ */
+window.addCouch = function() {
+    debugger; // Debugger for addCouch
+    const couchWidth = 2.5;
+    const couchHeight = 0.8;
+    const couchDepth = 1.0;
+    const couchGroup = createCouchMesh(couchWidth, couchHeight, couchDepth);
     couchGroup.position.set(0, 0, 0);
     scene.add(couchGroup);
     window.selectObject(couchGroup);
@@ -2115,6 +2277,7 @@ window.addCouch = function() {
  * Applies the selected color from the color picker to the currently selected object.
  */
 window.applyColorToSelected = function() {
+    debugger; // Debugger for applyColorToSelected
     if (selectedObject) {
         const newColor = colorPickerElement.value;
         const color = new THREE.Color(newColor).getHex();
@@ -2147,6 +2310,7 @@ window.applyColorToSelected = function() {
  * Applies the selected texture to the currently selected object.
  */
 window.applyTextureToSelected = function() {
+    debugger; // Debugger for applyTextureToSelected
     if (selectedObject) {
         const textureName = textureSelectElement.value;
         let newMaterial;
@@ -2231,6 +2395,7 @@ window.applyTextureToSelected = function() {
  * @param {string} operationType - 'subtract', 'union', or 'intersect'.
  */
 function applyCSGCut(baseMesh, cutterObject, operationType) {
+    debugger; // Debugger for applyCSGCut
     if (!baseMesh || !cutterObject) return;
 
     // Create a temporary mesh from the cutter's bounding box or a simple representation
@@ -2249,6 +2414,8 @@ function applyCSGCut(baseMesh, cutterObject, operationType) {
     // If it's already a CSG result, it will be a BufferGeometry.
     // If it's a primitive like a new wall, convert it.
     let csgBaseMesh = baseMesh;
+    // Check if the geometry is already a BufferGeometry, if not, convert it.
+    // This is important because three-bvh-csg expects BufferGeometry.
     if (!(baseMesh.geometry instanceof THREE.BufferGeometry)) {
         const tempGeometry = new THREE.BufferGeometry().fromGeometry(baseMesh.geometry);
         csgBaseMesh = new THREE.Mesh(tempGeometry, baseMesh.material);
@@ -2260,7 +2427,7 @@ function applyCSGCut(baseMesh, cutterObject, operationType) {
     }
 
 
-    const csg = new CSG();
+    const csg = new CSG(); // CSG is now globally available
     let newResultMesh;
 
     try {
@@ -2336,6 +2503,7 @@ function applyCSGCut(baseMesh, cutterObject, operationType) {
  * Adds the current camera position and target to the tour points.
  */
 window.addTourPoint = function() {
+    debugger; // Debugger for addTourPoint
     tourPoints.push({
         position: camera.position.clone(),
         target: cameraTarget.clone() // Or camera.getWorldDirection for walk mode
@@ -2348,6 +2516,7 @@ window.addTourPoint = function() {
  * Renders the list of tour points in the UI.
  */
 function renderTourPointsList() {
+    debugger; // Debugger for renderTourPointsList
     const tourPointsUl = document.getElementById('tour-points-ul');
     tourPointsUl.innerHTML = '';
     if (tourPoints.length === 0) {
@@ -2365,6 +2534,7 @@ function renderTourPointsList() {
  * Clears all stored tour points.
  */
 window.clearTourPoints = function() {
+    debugger; // Debugger for clearTourPoints
     tourPoints = [];
     renderTourPointsList();
     document.getElementById('model-status').textContent = "All tour points cleared.";
@@ -2374,6 +2544,7 @@ window.clearTourPoints = function() {
  * Starts the virtual tour animation.
  */
 window.startTour = function() {
+    debugger; // Debugger for startTour
     if (tourPoints.length < 2) {
         document.getElementById('project-message').textContent = "Need at least 2 tour points to start a tour.";
         return;
@@ -2391,6 +2562,7 @@ window.startTour = function() {
  * Stops the virtual tour animation.
  */
 window.stopTour = function() {
+    debugger; // Debugger for stopTour
     isTourActive = false;
     if (tourAnimationId) {
         cancelAnimationFrame(tourAnimationId);
@@ -2403,6 +2575,7 @@ window.stopTour = function() {
  * Animates the camera along the defined tour path.
  */
 function animateTour() {
+    debugger; // Debugger for animateTour
     if (!isTourActive || tourPoints.length < 2) {
         window.stopTour();
         return;
@@ -2414,6 +2587,7 @@ function animateTour() {
     const startTime = performance.now();
 
     function moveCamera() {
+        debugger; // Debugger inside moveCamera
         const elapsed = performance.now() - startTime;
         let progress = elapsed / TOUR_TRANSITION_DURATION;
 
@@ -2444,6 +2618,7 @@ function animateTour() {
  * Renders the scene and updates first-person camera movement.
  */
 window.animate = function() {
+    // debugger; // Can be added here if needed for every frame
     requestAnimationFrame(window.animate);
 
     // Apply object movement if an object is selected and not in walk mode or drawing/offsetting or tour active
